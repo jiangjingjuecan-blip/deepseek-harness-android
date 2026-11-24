@@ -15,6 +15,7 @@ final class Loopback implements AutoCloseable {
             .connectTimeout(5,TimeUnit.SECONDS).readTimeout(45,TimeUnit.SECONDS)
             .pingInterval(20,TimeUnit.SECONDS).build();
     private final Diagnostics log;
+    private final OkHttpClient commands=http.newBuilder().readTimeout(5,TimeUnit.MINUTES).build();
     private final Process runtime;
     private volatile boolean closed;
     private volatile String cookie;
@@ -46,7 +47,8 @@ final class Loopback implements AutoCloseable {
         String id = UUID.randomUUID().toString();
         JSONObject body = Wire.obj("type", "client-request", "rpcId", id, "method", method, "payload", Wire.obj("args",args));
         Request req = local("/api/" + method).header("Connection", "close").post(RequestBody.create(body.toString(), MediaType.get("application/json"))).build();
-        try (Response response = http.newCall(req).execute()) {
+        OkHttpClient client="commands/execute".equals(method) ? commands : http;
+        try (Response response = client.newCall(req).execute()) {
             log.add(method.startsWith("account/") ? HTTP_ACCOUNT : method.endsWith("Catalog") ? HTTP_MODELS : HTTP_CHAT, response.code());
             if (!response.isSuccessful()) {
                 JSONObject error = null;

@@ -34,15 +34,31 @@ public final class DeviceSmoke extends Instrumentation {
                 checkBindings(result);
                 result.putString("passed",mode); finish(Activity.RESULT_OK,result); return;
             }
-            if ("session".equals(mode)) {
+            if ("session".equals(mode) || "context-guest".equals(mode)) {
                 app=(HarnessApp)getTargetContext().getApplicationContext();
                 app.startForegroundService(new Intent(app,HarnessService.class));
-                materializeSession(result);
+                if ("session".equals(mode)) materializeSession(result);
+                else {
+                    Loopback api=ready();
+                    stage="guest-context-preset";
+                    String id=api.rpc("session/create",Wire.request(Wire.obj("cwd",Guest.CHAT_DIR,"agentPreset","phone-chat")))
+                            .getString("sessionId");
+                    // An empty account has no selectable route. Exercise the installed
+                    // preset handler through its argument check, before resolving a model.
+                    JSONObject command=api.rpc("commands/execute",Wire.obj("agentId",id,"line","/phone-context probe",
+                            "submittedAttachments",new JSONArray())).getJSONObject("result");
+                    if (!"error".equals(command.optString("kind")) || !"参数错误".equals(command.optString("text")))
+                        throw new AssertionError();
+                }
                 result.putString("passed",mode); finish(Activity.RESULT_OK,result); return;
             }
             activity=(MainActivity)startActivitySync(new Intent(getTargetContext(),MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             app=(HarnessApp)activity.getApplication();
-            if ("login-init".equals(mode)) loginInit();
+            if ("context".equals(mode)) {
+                DeviceContext test=new DeviceContext(this,activity);
+                try { test.run(Integer.parseInt(options.getString("fixturePort"))); }
+                finally { stage=test.stage; }
+            } else if ("login-init".equals(mode)) loginInit();
             else if ("runtime".equals(mode)) stopRuntime();
             else history("reopen".equals(mode));
             result.putString("passed",mode); finish(Activity.RESULT_OK,result);

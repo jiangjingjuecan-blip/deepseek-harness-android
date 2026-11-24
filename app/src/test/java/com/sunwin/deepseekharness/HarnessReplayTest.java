@@ -58,7 +58,7 @@ public class HarnessReplayTest {
                     assertEquals("interrupted",answer.state); assertEquals("",answer.text);
                     assertEquals("HTTP 402 · 账号额度不足",answer.error);
                 } else {
-                    assertEquals("done",answer.state); assertNull(answer.error);
+                    assertEquals(answer.error,"done",answer.state); assertNull(answer.error);
                     assertEquals(turn==0 ? "紫色" : "第二轮",answer.text);
                 }
             }
@@ -66,6 +66,7 @@ public class HarnessReplayTest {
             ByteArrayOutputStream exported=new ByteArrayOutputStream();
             app.log.export(exported);
             assertTrue(exported.toString("UTF-8").contains("CHAT_INTERRUPTED REPLY HTTP 402 · 账号额度不足 [ACCOUNT_QUOTA]"));
+            contextTurns(app,chat,api,photo);
             app.account.signOut();
             await("fixture sign-out",()->!app.account.loading && !app.account.stored);
             command(p,"done");
@@ -75,6 +76,52 @@ public class HarnessReplayTest {
             if (api!=null) api.close();
             p.getOutputStream().close();
             if (!p.waitFor(5,TimeUnit.SECONDS)) p.destroyForcibly();
+        }
+    }
+    private void contextTurns(HarnessApp app,ChatEngine chat,Loopback api,String photo) throws Exception {
+        long id=app.history.create();
+        String[] prompts={"固定首问","旧甲"+String.join("",java.util.Collections.nCopies(600,"甲")),
+                "旧乙"+String.join("",java.util.Collections.nCopies(600,"乙")),"近三","近四","近五","抬高用量","核对自动"};
+        for (int turn=0;turn<prompts.length;turn++) {
+            if (turn==6) {
+                chat.compact(id);
+                await("manual compact",()->!chat.busy);
+                assertEquals(12,app.history.messages(id).size());
+            }
+            assertTrue(chat.send(id,prompts[turn],turn==1 ? photo : null));
+            await("context turn",()->!chat.busy);
+            History.Message answer=app.history.messages(id).get(turn*2+1);
+            assertEquals(answer.error,"done",answer.state);
+            if (turn==0) {
+                String session=app.history.chat(id).remote;
+                for (String model:app.account.models) {
+                    api.rpc("session/selectModel",Wire.request(Wire.obj("sessionId",session,"provider","deepseek-account","model",model)));
+                    ContextUsage usage=ContextUsage.prepare(api,session,"0");
+                    boolean future="fixture-future".equals(model);
+                    long threshold=future ? 40960 : 638976;
+                    assertEquals(future ? 65536 : 1048576,usage.window);
+                    long remaining=threshold-usage.used;
+                    assertFalse(ContextUsage.prepare(api,session,String.valueOf(remaining-1)).compacted);
+                    assertEquals("上下文过长",assertThrows(ChatFailure.class,
+                            ()->ContextUsage.prepare(api,session,String.valueOf(remaining))).getMessage());
+                    assertEquals("消息过长",assertThrows(ChatFailure.class,
+                            ()->ContextUsage.prepare(api,session,String.valueOf(threshold))).getMessage());
+                }
+            }
+        }
+        assertEquals(16,app.history.messages(id).size());
+        for (int i=0;i<prompts.length;i++) assertEquals(prompts[i],app.history.messages(id).get(i*2).text);
+        assertEquals(photo,app.history.messages(id).get(2).photo);
+        assertArrayEquals(Files.readAllBytes(Paths.get("src/test/resources/photo.jpg")),
+                Files.readAllBytes(new File(app.getFilesDir(),photo).toPath()));
+        long routes=app.history.create();
+        for (String model:new String[]{"fixture-future","deepseek-v4-pro"}) {
+            app.account.selected=model;
+            assertTrue(chat.send(routes,"fixture-future".equals(model) ? "测试新模型" : "核对恢复",null));
+            await("routed output cap",()->!chat.busy);
+            java.util.List<History.Message> rows=app.history.messages(routes);
+            History.Message answer=rows.get(rows.size()-1);
+            assertEquals(model+" "+answer.error,"done",answer.state);
         }
     }
     private static void await(String label,BooleanSupplier condition) throws InterruptedException {

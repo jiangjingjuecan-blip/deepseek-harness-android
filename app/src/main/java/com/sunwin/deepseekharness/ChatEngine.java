@@ -15,7 +15,7 @@ final class ChatEngine {
     private final ExecutorService io=Executors.newSingleThreadExecutor();
     volatile boolean busy;
     ChatEngine(HarnessApp app,String cwd) { this.app=app; this.cwd=cwd; }
-    boolean send(long chatId,String text,String photo) {
+    synchronized boolean send(long chatId,String text,String photo) {
         Loopback api=app.api;
         String model=app.account.selected;
         if (busy || api==null || !app.account.stored || model.isEmpty() || (text.isEmpty() && photo==null)) return false;
@@ -30,6 +30,29 @@ final class ChatEngine {
         io.execute(() -> run(api,chatId,row,model,text,photo));
         return true;
     }
+    private void select(Loopback api,String session,String model) throws Exception {
+        api.rpc("session/selectModel",Wire.request(Wire.obj("sessionId",session,"provider","deepseek-account","model",model)));
+    }
+    synchronized void compact(long chatId) {
+        Loopback api=app.api;
+        String model=app.account.selected;
+        if (busy) { app.notice("正在处理"); return; }
+        String session=app.history.chat(chatId).remote;
+        if (session==null) { app.notice("无需压缩"); return; }
+        if (api==null || !app.account.stored || model.isEmpty()) { app.notice("未连接"); return; }
+        busy=true; app.changed();
+        io.execute(()->{
+            try {
+                select(api,session,model);
+                ContextUsage usage=ContextUsage.prepare(api,session,"manual");
+                app.history.meter(chatId,model,usage);
+                app.notice(usage.compacted ? "成功" : "无需压缩");
+            } catch (Exception e) {
+                ChatFailure failure=ChatFailure.caught(e,CONTEXT);
+                app.log.interrupted(CONTEXT,failure); app.notice("压缩失败");
+            } finally { busy=false; app.changed(); }
+        });
+    }
     private void run(Loopback api,long chatId,long row,String model,String text,String photo) {
         String requestId=UUID.randomUUID().toString();
         Reply reply=new Reply(requestId);
@@ -37,6 +60,8 @@ final class ChatEngine {
         String session=null;
         ChatFailure.Stage stage=CREATE_SESSION;
         ChatFailure failure=null;
+        long draft=ContextUsage.estimate(text,photo!=null);
+        ContextUsage prepared=null;
         try {
             session=app.history.chat(chatId).remote;
             if (session==null) {
@@ -47,14 +72,23 @@ final class ChatEngine {
                 app.history.link(chatId,session);
             }
             stage=SELECT_MODEL;
-            api.rpc("session/selectModel",Wire.request(Wire.obj("sessionId",session,"provider","deepseek-account","model",model)));
+            select(api,session,model);
+            stage=CONTEXT;
+            prepared=ContextUsage.prepare(api,session,Long.toString(draft));
+            app.history.meter(chatId,model,prepared);
+            app.changed();
             stage=READ_PHOTO;
             String jpeg=photo==null ? null : Base64.getEncoder().encodeToString(Files.readAllBytes(new File(app.getFilesDir(),photo).toPath()));
             JSONObject prompt=Wire.prompt(session,requestId,text,jpeg);
             Feed feed=new Feed(Wire.follow(session).toString());
             stage=FOLLOW;
             socket=api.follow(feed);
-            if (!"snapshot".equals(feed.next(25,"订阅快照超时").getString("type"))) throw new ChatFailure("订阅首帧缺少快照");
+            JSONObject snapshot=feed.next(25,"订阅快照超时");
+            if (!"snapshot".equals(snapshot.getString("type"))) throw new ChatFailure("订阅首帧缺少快照");
+            ContextUsage opening=ContextUsage.projection(snapshot,prepared.window);
+            if (opening!=null && opening.window==prepared.window) {
+                app.history.meter(chatId,model,opening); app.changed();
+            }
             stage=PROMPT;
             JSONObject ack=api.rpc("session/prompt",prompt);
             if (ack==null || !ack.optBoolean("accepted")) throw new ChatFailure("DSH 未接受消息");
@@ -64,7 +98,12 @@ final class ChatEngine {
             String visible="";
             while (!reply.ended) {
                 ChatFailure previous=reply.attemptFailure;
+                long previousCount=reply.contextTokens;
                 dirty |= reply.accept(feed.next(180,"等待回复事件超时"));
+                if (reply.contextTokens>=0 && reply.contextTokens!=previousCount) {
+                    app.history.meter(chatId,model,new ContextUsage(reply.contextTokens,prepared.window,false));
+                    app.changed();
+                }
                 if (reply.attemptFailure!=null && reply.attemptFailure!=previous) app.log.attemptFailed(reply.attemptFailure);
                 long now=android.os.SystemClock.elapsedRealtime();
                 if (dirty && !reply.ended && (feed.messages.isEmpty() || now-saved>=70)) {
@@ -87,6 +126,8 @@ final class ChatEngine {
             try {
                 if (failure==null && reply.completed) {
                     app.history.update(row,reply.body(),"done");
+                    if (reply.contextTokens<0 && prepared!=null) app.history.meter(chatId,model,
+                            new ContextUsage(prepared.used+draft+ContextUsage.estimate(reply.body(),false),prepared.window,false));
                     app.log.add(CHAT_COMPLETE);
                 } else {
                     if (failure==null) failure=new ChatFailure("DSH 回合未结束");

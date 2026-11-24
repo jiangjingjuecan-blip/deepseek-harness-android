@@ -8,7 +8,7 @@ import javax.net.ssl.SSLException;
 
 /** Only fixed labels, known DSH codes and validated numbers may enter history or the exported log. */
 final class ChatFailure extends IOException {
-    enum Stage { CREATE_SESSION, SELECT_MODEL, READ_PHOTO, FOLLOW, PROMPT, REPLY, SAVE_REPLY }
+    enum Stage { CREATE_SESSION, SELECT_MODEL, CONTEXT, READ_PHOTO, FOLLOW, PROMPT, REPLY, SAVE_REPLY }
 
     private static final Set<String> CODES = new HashSet<>(Arrays.asList((
             "ACCOUNT_QUOTA QUOTA ACCOUNT_SIGN_IN_REQUIRED ACCOUNT_TOKEN_INVALID AUTH INVALID_CREDENTIAL MISSING_CREDENTIAL " +

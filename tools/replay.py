@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import threading
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 PHOTO = (ROOT / 'app/src/test/resources/photo.jpg').read_bytes()
@@ -35,12 +36,22 @@ class Server(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(obj).encode())
 
     def do_GET(self):
+        if self.path == '/fixture-connect':
+            connection = self.server.__dict__.pop('handoff', None)
+            if connection is None:
+                self.send_error(404)
+            else:
+                self.json(connection)
+            return
         if not self.authorized():
             return
         if self.path == '/models':
-            self.json({'data': [{'id': 'deepseek-flash', 'input_modalities': ['text', 'image'],
-                       'output_modalities': ['text'], 'api_capabilities': {
-                           'anthropic_messages': {'system_prompt_update': 'in-history'}}}]})
+            self.json({'data': [{'id': model, 'context_window': 1048576, 'max_output_tokens': 393216,
+                       'client_requirements': {'deepseek-harness': {'min_version': '0.2.2-rc.2'}},
+                       'input_modalities': modalities, 'output_modalities': ['text'], 'api_capabilities': {
+                           'anthropic_messages': {}}} for model, modalities in
+                           [('deepseek-flash',['text','image']), ('deepseek-v4-pro',['text']),
+                            ('fixture-future',['text'])]]})
         elif self.path == '/auth-api/v0/users/current':
             self.json({'code': 0, 'data': {'biz_code': 0, 'biz_data': {'id': 'fixture', 'email': ''}}})
         elif self.path == '/api/v0/users/get_user_summary':
@@ -73,6 +84,64 @@ class Server(BaseHTTPRequestHandler):
             return
         obj = json.loads(data)
         msgs = obj['messages']
+        contents = json.dumps(msgs, ensure_ascii=False)
+        last = json.dumps(msgs[-1], ensure_ascii=False)
+        if self.is_title(obj):
+            self.stream('回放')
+            return
+        if '测试新模型' in last or '核对恢复' in last:
+            future='测试新模型' in last
+            if (obj.get('model'),obj.get('max_tokens')) != (('fixture-future',8192) if future else ('deepseek-v4-pro',256000)):
+                self.send_error(400)
+                return
+            self.server.seen.add('future-cap' if future else 'restored-cap')
+            self.stream('收到')
+            return
+        if 'Condense the conversation ABOVE' in last:
+            old_a, old_b = '甲' * 300 in contents, '乙' * 300 in contents
+            if obj.get('max_tokens') != 2048 or old_a == old_b or '近三' in contents:
+                self.send_error(400)
+                return
+            if old_b and '摘要甲' not in contents:
+                self.send_error(400)
+                return
+            self.server.summaries.append('a' if old_a else 'b')
+            self.server.seen.add('summary-a' if old_a else 'summary-b')
+            self.stream('摘要甲' if old_a else '摘要乙')
+            return
+        if '固定首问' in contents and obj.get('stream'):
+            # Compare the actual provider envelope, including serialized roles and tools.
+            prefix = [obj.get('system'),obj.get('tools'),msgs[0]]
+            if self.server.prefix is None:
+                self.server.prefix = prefix
+            if prefix != self.server.prefix:
+                self.send_error(400)
+                return
+            if len(msgs)>1:
+                if self.server.first_reply is None:
+                    self.server.first_reply=msgs[1]
+                if msgs[1]!=self.server.first_reply:
+                    self.send_error(400)
+                    return
+            answers={'固定首问':'首答', '旧甲':'旧图是紫色', '旧乙':'乙答', '近三':'三答',
+                     '近四':'四答', '近五':'五答', '抬高用量':'六答', '核对自动':'七答'}
+            if '抬高用量' in last or '核对自动' in last:
+                auto = '核对自动' in last
+                recent = ['近三','近四','近五','抬高用量'] if auto else ['旧乙'+'乙'*600,'近三','近四','近五']
+                summary = '摘要乙' if auto else '摘要甲'
+                texts=[(m['role'],b['text']) for m in msgs for b in m['content']
+                       if isinstance(b,dict) and b.get('type')=='text']
+                tail=[]
+                for question in recent:
+                    tail.extend([('user',question),('assistant',answers['旧乙' if question.startswith('旧乙') else question])])
+                if (summary not in contents or '甲' * 300 in contents or (auto and '乙' * 300 in contents)
+                        or texts[-9:-1]!=tail or '首答' not in contents):
+                    self.send_error(400)
+                    return
+                self.server.seen.add('auto-tail' if auto else 'manual-tail')
+            self.stream(next((answer for label,answer in answers.items() if label in last),'收到'),
+                        638976 if '抬高用量' in last else 240)
+            return
         if '额度回放' in json.dumps(msgs[-1], ensure_ascii=False):
             self.server.seen.add('quota')
             self.send_response(402)
@@ -85,16 +154,24 @@ class Server(BaseHTTPRequestHandler):
                     and any(x.get('source',{}).get('file_id')=='file-pixel' for x in m['content'])
                     for m in msgs)
         second = '继续' in json.dumps(msgs[-1], ensure_ascii=False)
-        if obj.get('model') != 'deepseek-flash' or obj.get('stream') is not True or not first:
+        if obj.get('model') != 'deepseek-flash' or obj.get('stream') is not True or (not second and not first):
             self.send_error(400)
             return
         if second:
-            if not any(m['role']=='assistant' and '紫色' in json.dumps(m,ensure_ascii=False) for m in msgs):
+            if (first or 'image omitted' not in contents or '"type": "image"' in contents or
+                    not any(m['role']=='assistant' and '紫色' in json.dumps(m,ensure_ascii=False) for m in msgs)):
                 self.send_error(400)
                 return
             self.server.seen.add('multi')
         else:
             self.server.seen.add('image-turn')
+        self.stream('第二轮' if second else '紫', split=not second)
+
+    @staticmethod
+    def is_title(obj):
+        return 'title' in str(obj.get('system','')).lower()
+
+    def stream(self, answer, input_tokens=2, split=False):
         self.send_response(200)
         self.send_header('Content-Type','text/event-stream')
         self.end_headers()
@@ -104,20 +181,19 @@ class Server(BaseHTTPRequestHandler):
             self.wfile.write(f'event: {kind}\ndata: {body}\n\n'.encode())
             self.wfile.flush()
 
-        event('message_start', message={'id':'replay','model':'deepseek-flash','usage':{'input_tokens':2}})
+        event('message_start', message={'id':'replay','model':'deepseek-flash','usage':{'input_tokens':input_tokens}})
         event('content_block_start', index=0, content_block={'type':'text','text':''})
-        event('content_block_delta', index=0, delta={'type':'text_delta','text':'第二轮' if second else '紫'})
-        if not second and self.server.advance.wait(12):
+        event('content_block_delta', index=0, delta={'type':'text_delta','text':answer})
+        if split and self.server.advance.wait(12):
             self.server.seen.add('early')
-        if not second:
+        if split:
             event('content_block_delta', index=0, delta={'type':'text_delta','text':'色'})
         event('content_block_stop', index=0)
         event('message_delta', delta={'stop_reason':'end_turn'},usage={'output_tokens':2})
         event('message_stop')
 
 
-def run():
-    abi, root = sys.argv[1], Path(sys.argv[2])
+def run(abi, root, serial=None):
     layout = ROOT / 'runtime-cache' / abi
     sysroot = root / 'sys'
     for line in (layout/'assets/bindings.tsv').read_text().splitlines():
@@ -137,6 +213,9 @@ def run():
         server.advance=threading.Event()
         server.grant=secrets.token_urlsafe(24)
         server.seen=set()
+        server.prefix=None
+        server.first_reply=None
+        server.summaries=[]
         origin='http://127.0.0.1:'+str(server.server_port)
         (home/'.credentials.yaml').write_text(json.dumps({'version':1,'records':{'deepseek-account-platform/default':
             {'kind':'grant','payload':{'version':1,'token':server.grant,'issuer':origin}}}}))
@@ -147,7 +226,10 @@ def run():
             {'id':'llm-deepseek-account','config':{'baseURL':origin}}]))
         threading.Thread(target=server.serve_forever,daemon=True).start()
         cmd = ['qemu-aarch64','-L',str(sysroot)] if arch=='arm64' else []
-        cmd += [str(binary),'web','--patch',str(ROOT/'app/src/main/assets/chat.yml'),
+        assets = ROOT/'app/src/main/assets'
+        preset = root/'chat.yml'
+        preset.write_text((assets/'chat.yml').read_text().replace('/etc/phone-context.cjs', str(assets/'phone-context.cjs')))
+        cmd += [str(binary),'web','--patch',str(preset),
                 '--patch',str(patch),'--no-open','--host','127.0.0.1','--port','0']
         env={'HOME':str(root),'DSH_HOME':str(home),'PATH':'/usr/bin:/bin','TMPDIR':str(root),
              'DSH_TELEMETRY_DISABLED':'1','NARB_NATIVE_CACHE_DIR':str(sysroot/'opt/native-cache'),
@@ -155,6 +237,13 @@ def run():
         with subprocess.Popen(cmd, env=env,cwd=root,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
                               stdin=subprocess.DEVNULL,start_new_session=True) as proc:
             try:
+                if serial:
+                    for line in proc.stdout:
+                        launch=re.fullmatch(rb'dsh web: http://127\.0\.0\.1:(\d+)(/\?token=\S+)\s*', line)
+                        if launch:
+                            return device(serial, server, root, int(launch[1]), launch[2].decode())
+                    return False
+
                 def pipe_launch():
                     for line in proc.stdout:
                         if re.fullmatch(rb'dsh web: http://127\.0\.0\.1:\d+/\?token=\S+\s*',line):
@@ -167,7 +256,9 @@ def run():
                     if line.strip()=='advance':
                         server.advance.set()
                     if line.strip()=='done':
-                        return server.seen=={'early','multi','image-turn','photo','quota'}
+                        return (server.summaries == ['a','b'] and
+                                server.seen=={'early','multi','image-turn','photo','quota','future-cap','restored-cap',
+                                              'summary-a','summary-b','manual-tail','auto-tail'})
             finally:
                 if proc.poll() is None:
                     os.killpg(proc.pid,signal.SIGTERM)
@@ -175,8 +266,34 @@ def run():
                     except subprocess.TimeoutExpired: os.killpg(proc.pid,signal.SIGKILL)
 
 
+def device(serial, server, root, runtime_port, bootstrap):
+    adb = [str(Path(os.environ['ANDROID_HOME'])/'platform-tools/adb'),'-s',serial]
+    ports = []
+    try:
+        for port in [server.server_port,runtime_port]:
+            port_arg = 'tcp:'+str(port)
+            subprocess.run([*adb,'reverse',port_arg,port_arg],check=True,stdout=subprocess.DEVNULL)
+            ports.append(port_arg)
+        # Single-use handoff over adb loopback. No credential goes in argv or instrumentation output.
+        server.handoff={'port':runtime_port,'path':bootstrap,'cwd':str(root)}
+        result=subprocess.run([*adb,'shell','am','instrument','-w','-e','scenario','context',
+                               '-e','fixturePort',str(server.server_port),
+                               'com.sunwin.deepseekharness.test/com.sunwin.deepseekharness.DeviceSmoke'],
+                              stdout=subprocess.PIPE,text=True,check=True)
+        print(result.stdout, end='')
+        print('Provider observations:',', '.join(sorted(server.seen)))
+        return ('passed=context' in result.stdout and server.summaries == ['a','b'] and
+                {'summary-a','summary-b','manual-tail','auto-tail'} <= server.seen)
+    finally:
+        for port in ports:
+            subprocess.run([*adb,'reverse','--remove',port],check=False)
+
+
 if __name__=='__main__':
+    os.umask(0o077)
+    if len(sys.argv)==3 and sys.argv[1]=='--device':
+        with tempfile.TemporaryDirectory(prefix='phone-context-') as root:
+            raise SystemExit(0 if run('arm64-v8a',Path(root),sys.argv[2]) else 1)
     if not all(stat.S_ISFIFO(os.fstat(fd).st_mode) for fd in (0,1)) or len(sys.argv)!=3:
         raise SystemExit('Run the Gradle replay test.')
-    os.umask(0o077)
-    raise SystemExit(0 if run() else 1)
+    raise SystemExit(0 if run(sys.argv[1],Path(sys.argv[2])) else 1)

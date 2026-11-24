@@ -4,13 +4,15 @@ DeepSeek 助手是一款 Android 聊天客户端。它通过 PRoot 在手机上�
 
 你可以在系统浏览器登录 DeepSeek 账号，流式查看回复，把相册或相机里的图片和问题一起发送。对话历史保存在本机 SQLite 数据库，图片保存在应用私有目录。设置中可以切换模型、查看余额，并打开[官方充值页](https://platform.deepseek.com/top_up)。
 
+聊天顶栏显示当前上下文用量。点百分比可选「压缩上下文」。自动压缩会保留首轮和最近四轮。历史列表仍可查看完整原文和照片。[上下文策略与实测](docs/CONTEXT.md)
+
 ## 安装测试版
 
 适用于 Android 10 及以上、支持 `arm64-v8a` 的手机。
 
-1. 在项目的 GitHub Release 中找到 `v0.1.2-test`，下载附件 `deepseek-harness-test.apk`。[发布页](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/tag/v0.1.2-test) · [下载 APK](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/download/v0.1.2-test/deepseek-harness-test.apk)
-2. 核对文件大小 **131,166,048 字节（125.09 MiB）**。在电脑上可运行 `sha256sum deepseek-harness-test.apk`，预期 SHA-256 为 `76f7e924d40eba2d1cb1ffbaa6c3fc183b6da90257d179775444cd3fcab3f531`。
-3. 在手机上点开 APK 安装。已安装 v0.1.0-test 或 v0.1.1-test 的手机可直接覆盖升级，保留本地对话。如果系统询问，允许当前浏览器或文件管理器安装此应用。
+1. 在项目的 GitHub Release 中找到 `v0.1.3-test`，下载附件 `deepseek-harness-test.apk`。[发布页](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/tag/v0.1.3-test) · [下载 APK](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/download/v0.1.3-test/deepseek-harness-test.apk)
+2. 核对文件大小 **131,176,105 字节（125.10 MiB）**。在电脑上可运行 `sha256sum deepseek-harness-test.apk`，预期 SHA-256 为 `0f78a9dd71a850842f4eba0f8850fb4ac527fe994751b5dd46e6f24c6a90d697`。
+3. 在手机上点开 APK 安装。已安装 v0.1.0-test 至 v0.1.2-test 的手机可直接覆盖升级，保留本地对话。如果系统询问，允许当前浏览器或文件管理器安装此应用。
 
 ## 在手机上试用
 

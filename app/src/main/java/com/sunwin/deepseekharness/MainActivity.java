@@ -31,7 +31,7 @@ public final class MainActivity extends Activity {
     private boolean openLogin, visible;
     private LinearLayout root, content, thread, intro, attachment;
     private ScrollView scroll;
-    private TextView header, subtitle;
+    private TextView header, subtitle, meter;
     private EditText input;
     private ImageButton send;
     private final HashMap<Long,TextView> bubbles=new HashMap<>();
@@ -103,7 +103,17 @@ public final class MainActivity extends Activity {
         header=a.text("",18,INK,true); header.setSingleLine(true); header.setEllipsize(TextUtils.TruncateAt.END);
         titles.addView(header); subtitle=a.text("",12,DIM,false); titles.addView(subtitle);
         bar.addView(titles,new LinearLayout.LayoutParams(0,-1,1));
-        if (chat) bar.addView(a.icon(R.drawable.ic_settings,"设置",()->go("settings")),a.size(48,48));
+        if (chat) {
+            meter=a.text("",12,DIM,false); meter.setGravity(Gravity.CENTER);
+            a.buttonStyle(meter,PAPER,14); meter.setTooltipText("压缩上下文");
+            meter.setOnClickListener(v->{
+                PopupMenu menu=new PopupMenu(this,v);
+                menu.getMenu().add("压缩上下文").setOnMenuItemClickListener(item->{ app.chat.compact(chatId); return true; });
+                menu.show();
+            });
+            bar.addView(meter,a.size(48,48));
+            bar.addView(a.icon(R.drawable.ic_settings,"设置",()->go("settings")),a.size(48,48));
+        }
         if ("history".equals(screen)) bar.addView(a.icon(R.drawable.ic_plus,"新建对话",()->selectChat(app.history.create())),a.size(48,48));
         View rule=new View(this); rule.setBackgroundColor(LINE); root.addView(rule,new LinearLayout.LayoutParams(-1,1));
         content=a.column(); root.addView(content,new LinearLayout.LayoutParams(-1,0,1));
@@ -121,6 +131,8 @@ public final class MainActivity extends Activity {
             case "settings": header.setText("设置"); showSettings(); break;
             default:
                 History.Chat chat=app.history.chat(chatId); header.setText(chat.title);
+                String percent=app.history.meter(chatId,app.account.selected).percent();
+                meter.setText(percent); meter.setContentDescription("上下文用量 "+percent);
                 Loopback api=app.api;
                 subtitle.setText(api!=null && app.account.stored ? app.account.modelStatus(api) : status());
                 subtitle.setVisibility(View.VISIBLE);

@@ -14,15 +14,36 @@ final class History extends SQLiteOpenHelper {
         final long id; final String role, text, photo, state, error;
         Message(Cursor c) { id=c.getLong(0); role=c.getString(1); text=c.getString(2); photo=c.getString(3); state=c.getString(4); error=c.getString(5); }
     }
-    History(Context context) { super(context, "chats.db", null, 2); }
+    History(Context context) { super(context, "chats.db", null, 3); }
     @Override public void onConfigure(SQLiteDatabase db) { db.setForeignKeyConstraintsEnabled(true); }
     @Override public void onCreate(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE chat(id INTEGER PRIMARY KEY, title TEXT NOT NULL, remote TEXT UNIQUE, updated INTEGER NOT NULL)");
         db.execSQL("CREATE TABLE message(id INTEGER PRIMARY KEY, chat INTEGER NOT NULL REFERENCES chat(id), role TEXT NOT NULL, body TEXT NOT NULL, photo TEXT, state TEXT NOT NULL, error TEXT)");
         db.execSQL("CREATE INDEX chat_messages ON message(chat,id)");
+        createMeter(db);
+    }
+    private static void createMeter(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE context_meter(chat INTEGER PRIMARY KEY REFERENCES chat(id) ON DELETE CASCADE, model TEXT NOT NULL, used INTEGER NOT NULL, capacity INTEGER NOT NULL)");
     }
     @Override public void onUpgrade(SQLiteDatabase db,int oldVersion,int newVersion) {
         if (oldVersion < 2) db.execSQL("ALTER TABLE message ADD COLUMN error TEXT");
+        if (oldVersion < 3) createMeter(db);
+    }
+    void meter(long id,String model,ContextUsage usage) {
+        getWritableDatabase().execSQL("INSERT OR REPLACE INTO context_meter(chat,model,used,capacity) VALUES(?,?,?,?)",
+                new Object[]{id,model,usage.used,usage.window});
+    }
+    ContextUsage meter(long id,String model) {
+        try (Cursor c=getReadableDatabase().rawQuery("SELECT model,used,capacity FROM context_meter WHERE chat=?",args(id))) {
+            if (c.moveToFirst()) {
+                long capacity=model.isEmpty() || model.equals(c.getString(0)) ? c.getLong(2) : ContextUsage.defaultWindow(model);
+                return new ContextUsage(c.getLong(1),capacity,false);
+            }
+        }
+        try (Cursor c=getReadableDatabase().rawQuery("SELECT SUM(length(CAST(body AS BLOB))+16+CASE WHEN photo IS NULL THEN 0 ELSE 1032 END) FROM message WHERE chat=?",args(id))) {
+            c.moveToFirst();
+            return new ContextUsage(c.isNull(0) ? 0 : c.getLong(0)+1024,ContextUsage.defaultWindow(model),false);
+        }
     }
     int recover() {
         ContentValues v = new ContentValues();

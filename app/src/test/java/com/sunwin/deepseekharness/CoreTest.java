@@ -79,6 +79,27 @@ public class CoreTest {
         assertTrue(text.contains("MODEL_DOES_NOT_SUPPORT_IMAGES") && text.contains("1008"));
         assertFalse(text.contains("private fixture text"));
     }
+    @Test public void contextUsesOneAttemptAndDisjointBuckets() throws Exception {
+        Reply r=new Reply("meter");
+        r.accept(enqueue("meter")); r.accept(event("turn/start",Wire.obj("turn",1)));
+        r.accept(new JSONObject("{type:'assistant-stream',frame:{type:'start',turn:1,attemptId:'current'}}"));
+        JSONObject usage=Wire.obj("inputTokens",245,"outputTokens",2,"cacheReadTokens",128,"cacheWriteTokens",3,
+                "reasoningTokens",1,"totalTokens",378);
+        JSONObject chunk=Wire.obj("type","usage","usage",usage);
+        r.accept(Wire.obj("type","assistant-stream","frame",Wire.obj("attemptId","old","chunk",chunk)));
+        assertEquals(-1,r.contextTokens);
+        r.accept(Wire.obj("type","assistant-stream","frame",Wire.obj("attemptId","current","chunk",chunk)));
+        assertEquals(378,r.contextTokens);
+        r.accept(event("assistant/message",Wire.obj("turn",1,"message",Wire.obj("content",new JSONArray().put(
+                Wire.obj("type","text","text","好"))),"usage",usage)));
+        assertEquals(378,r.contextTokens); assertEquals("好",r.body());
+        assertEquals(-1,ContextUsage.tokens(Wire.obj("inputTokens",1)));
+        assertEquals(16+3+4+1032,ContextUsage.estimate("好🌷",true));
+        ContextUsage opening=ContextUsage.projection(new JSONObject("{projections:{values:{tokenUsage:{outputTokens:999999},"+
+                "contextPressure:{pressureTokens:500000,projectedTokens:423,contextWindow:1048576}}}}"),65536);
+        assertEquals(423,opening.used); assertEquals("<1%",opening.percent());
+        assertNull(ContextUsage.projection(Wire.obj(),1048576));
+    }
     @Test public void rpcAndMuxErrorsRetainTheirSafeCause() throws Exception {
         JSONObject response=Wire.obj("rpcId","r","result",Wire.obj("ok",false,
                 "error",Wire.obj("code","gateway/internal","message","EACCES private fixture text")));

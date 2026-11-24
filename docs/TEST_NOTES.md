@@ -1,5 +1,11 @@
 # 安卓安装包验证
 
+## v0.1.3-test
+
+- `com.sunwin.deepseekharness` 的 versionCode 为 4，versionName 为 0.1.3，仅包含 arm64-v8a。APK 为 **131,176,105 字节（125.10 MiB）**，SHA-256 为 `0f78a9dd71a850842f4eba0f8850fb4ac527fe994751b5dd46e6f24c6a90d697`。
+- APK 通过 v2 签名验证。签名证书 SHA-256 为 `b849e51b4f5a8691ffca6eecbae2592fc28afe06acccc148c52b67f2abc2079e`，与前三版一致。ARM64 模拟器在安装 0.1.2 时写入对话，随后覆盖安装 0.1.3 并重开该对话，正文通过核对。
+- 主机两种架构各跑过 17 项测试。ARM64 模拟器上的最终签名客户端通过了顶栏百分比、手动压缩、下一轮前自动压缩及 16 条本地消息保留检查。八轮界面测试经 ADB 回环连接宿主上的官方 ARM64 DSH 和本地模型夹具。真实账号用了两次模型调用，分别是短回复与 DSH 自动标题。[上下文预算与分环境验证](CONTEXT.md)
+
 ## v0.1.2-test
 
 - 发布文件为 `dist-apk/deepseek-harness-test.apk`，大小 **131,166,048 字节（125.09 MiB）**，SHA-256 为 `76f7e924d40eba2d1cb1ffbaa6c3fc183b6da90257d179775444cd3fcab3f531`。[下载 APK](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/download/v0.1.2-test/deepseek-harness-test.apk)

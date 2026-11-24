@@ -62,4 +62,24 @@ public class HistoryTest {
         assertEquals("interrupted",answer.state); assertEquals("",answer.text);
         assertEquals("DSH 服务已停止",answer.error);
     }
+    @Test public void versionTwoTranscriptAndMeterSurviveReopenIndependently() {
+        Application ctx=RuntimeEnvironment.getApplication();
+        try (SQLiteDatabase db=ctx.openOrCreateDatabase("chats.db",0,null)) {
+            db.execSQL("CREATE TABLE chat(id INTEGER PRIMARY KEY,title TEXT NOT NULL,remote TEXT UNIQUE,updated INTEGER NOT NULL)");
+            db.execSQL("CREATE TABLE message(id INTEGER PRIMARY KEY,chat INTEGER NOT NULL REFERENCES chat(id),role TEXT NOT NULL,body TEXT NOT NULL,photo TEXT,state TEXT NOT NULL,error TEXT)");
+            db.execSQL("INSERT INTO chat VALUES(1,'旧对话','remote',0)");
+            db.execSQL("INSERT INTO message VALUES(1,1,'user','原始照片','photos/old.jpg','done',NULL)");
+            db.setVersion(2);
+        }
+        try (History db=new History(ctx)) {
+            assertTrue(db.meter(1,"deepseek-flash").used>=ContextUsage.estimate("原始照片",true));
+            db.meter(1,"deepseek-flash",new ContextUsage(77,1048576,true));
+        }
+        try (History db=new History(ctx)) {
+            assertEquals(77,db.meter(1,"deepseek-flash").used);
+            assertEquals("remote",db.chat(1).remote);
+            assertEquals("原始照片",db.messages(1).get(0).text);
+            assertEquals("photos/old.jpg",db.messages(1).get(0).photo);
+        }
+    }
 }

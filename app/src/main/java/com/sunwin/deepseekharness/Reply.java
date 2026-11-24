@@ -10,6 +10,7 @@ final class Reply {
     private int turn=-1;
     private String attemptId;
     boolean ended, completed;
+    long contextTokens=-1;
     ChatFailure failure, attemptFailure;
     Reply(String requestId) { this.requestId=requestId; }
     boolean active() { return turn>=0 && !ended; }
@@ -24,10 +25,16 @@ final class Reply {
             if ("start".equals(frame.optString("type"))) {
                 if (frame.getInt("turn")!=turn) return false;
                 attemptId=frame.getString("attemptId");
+                contextTokens=-1;
                 partial.setLength(0); attemptFailure=null; return true;
             }
             if (attemptId==null || !attemptId.equals(frame.optString("attemptId"))) return false;
             JSONObject chunk=frame.optJSONObject("chunk");
+            if (chunk!=null && "usage".equals(chunk.optString("type"))) {
+                long count=ContextUsage.tokens(chunk.optJSONObject("usage"));
+                if (count>=0) contextTokens=count;
+                return false;
+            }
             if (chunk!=null && "text-delta".equals(chunk.optString("type"))) {
                 partial.append(chunk.getString("text")); return true;
             }
@@ -55,6 +62,8 @@ final class Reply {
         switch (event.getString("type")) {
             case "assistant/message":
                 if (event.getJSONObject("data").getInt("turn")!=turn || !"append".equals(event.optString("surfaceOp"))) return false;
+                long count=ContextUsage.tokens(data.optJSONObject("usage"));
+                if (count>=0) contextTokens=count;
                 JSONArray parts=event.getJSONObject("data").getJSONObject("message").getJSONArray("content");
                 StringBuilder full=new StringBuilder();
                 for (int i=0;i<parts.length();i++) {

@@ -145,6 +145,7 @@ final class Guest {
         copy("guest/ca-certificates.crt", "etc/ssl/certs/ca-certificates.crt");
         copy("guest/downloads.json", "opt/dsh/linux-" + arch + "/downloads.json");
         copy("chat.yml", "etc/chat.yml");
+        copy("phone-context.cjs", "etc/phone-context.cjs");
         write("etc/hosts","127.0.0.1 localhost\n::1 localhost\n");
         write("etc/nsswitch.conf","passwd: files\ngroup: files\nhosts: files dns\n");
         write("etc/passwd","root:x:0:0:root:/home/dsh:/bin/sh\n");
