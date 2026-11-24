@@ -56,8 +56,8 @@ public class HistoryTest {
         app.api.close();
         assertTrue(app.chat.send(chat,"你好",null));
         long deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
-        while (app.chat.busy && System.nanoTime()<deadline) Thread.sleep(10);
-        assertFalse(app.chat.busy);
+        while (app.chat.busy() && System.nanoTime()<deadline) Thread.sleep(10);
+        assertFalse(app.chat.busy());
         History.Message answer=app.history.messages(chat).get(1);
         assertEquals("interrupted",answer.state); assertEquals("",answer.text);
         assertEquals("DSH 服务已停止",answer.error);

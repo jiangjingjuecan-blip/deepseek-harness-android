@@ -9,8 +9,12 @@ import org.robolectric.annotation.*;
 import java.io.*;
 import java.nio.file.*;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.function.BooleanSupplier;
 import java.util.regex.*;
+import okhttp3.*;
+import org.json.*;
 import static org.junit.Assert.*;
 
 @RunWith(RobolectricTestRunner.class)
@@ -48,11 +52,11 @@ public class HarnessReplayTest {
                 String image=(turn==0 || turn==3) ? photo : null;
                 assertTrue(chat.send(id,prompts[turn],image));
                 if (turn==0) {
-                    await("first delta written to SQLite",()->!chat.busy || "紫".equals(app.history.messages(id).get(1).text));
+                    await("first delta written to SQLite",()->!chat.busy() || "紫".equals(app.history.messages(id).get(1).text));
                     assertEquals("紫",app.history.messages(id).get(1).text);
                     command(p,"advance");
                 }
-                await("reply finished",()->!chat.busy);
+                await("reply finished",()->!chat.busy());
                 History.Message answer=app.history.messages(id).get(2*turn+1);
                 if (turn>=2) {
                     assertEquals("interrupted",answer.state); assertEquals("",answer.text);
@@ -67,6 +71,7 @@ public class HarnessReplayTest {
             app.log.export(exported);
             assertTrue(exported.toString("UTF-8").contains("CHAT_INTERRUPTED REPLY HTTP 402 · 账号额度不足 [ACCOUNT_QUOTA]"));
             contextTurns(app,chat,api,photo);
+            deleteLinkedChat(app,chat,api,id);
             app.account.signOut();
             await("fixture sign-out",()->!app.account.loading && !app.account.stored);
             command(p,"done");
@@ -78,6 +83,45 @@ public class HarnessReplayTest {
             if (!p.waitFor(5,TimeUnit.SECONDS)) p.destroyForcibly();
         }
     }
+    private void deleteLinkedChat(HarnessApp app,ChatEngine chat,Loopback api,long id) throws Exception {
+        String session=app.history.chat(id).remote;
+        BlockingQueue<String> frames=new LinkedBlockingQueue<>();
+        WebSocket ws=api.follow(new WebSocketListener() {
+            @Override public void onOpen(WebSocket socket,Response response) {
+                socket.send(Wire.obj("type","open","streamId","reply","endpoint","workspace/follow",
+                        "payload",Wire.obj("args",Wire.obj())).toString());
+            }
+            @Override public void onMessage(WebSocket socket,String json) { frames.offer(json); }
+        });
+        try {
+            JSONObject baseline=workspaceFrame(frames);
+            assertEquals("baseline",baseline.getString("type"));
+            assertEquals(0,baseline.getJSONObject("value").getJSONArray("archivedSessionIds").length());
+            long next=chat.delete(id,id);
+            assertNull(app.history.chat(id));
+            assertTrue(app.history.messages(next).isEmpty());
+            JSONObject change=workspaceFrame(frames);
+            assertEquals("archived",change.getString("type"));
+            JSONArray ids=change.getJSONArray("archivedSessionIds");
+            assertEquals(1,ids.length());
+            assertEquals(session,ids.getString(0));
+
+            long missing=app.history.create();
+            app.history.link(missing,"missing-fixture-session");
+            assertEquals(next,chat.delete(missing,next));
+            assertNull(app.history.chat(missing));
+            await("rejected archive recorded",()->{
+                ByteArrayOutputStream out=new ByteArrayOutputStream();
+                try { app.log.export(out); return out.toString("UTF-8").contains("SESSION_ARCHIVE_FAILED"); }
+                catch (IOException e) { throw new AssertionError(e); }
+            });
+        } finally { ws.close(1000,""); }
+    }
+    private JSONObject workspaceFrame(BlockingQueue<String> frames) throws Exception {
+        String frame=frames.poll(15,TimeUnit.SECONDS);
+        assertNotNull("workspace frame",frame);
+        return Wire.followItem(new JSONObject(frame));
+    }
     private void contextTurns(HarnessApp app,ChatEngine chat,Loopback api,String photo) throws Exception {
         long id=app.history.create();
         String[] prompts={"固定首问","旧甲"+String.join("",java.util.Collections.nCopies(600,"甲")),
@@ -85,11 +129,11 @@ public class HarnessReplayTest {
         for (int turn=0;turn<prompts.length;turn++) {
             if (turn==6) {
                 chat.compact(id);
-                await("manual compact",()->!chat.busy);
+                await("manual compact",()->!chat.busy());
                 assertEquals(12,app.history.messages(id).size());
             }
             assertTrue(chat.send(id,prompts[turn],turn==1 ? photo : null));
-            await("context turn",()->!chat.busy);
+            await("context turn",()->!chat.busy());
             History.Message answer=app.history.messages(id).get(turn*2+1);
             assertEquals(answer.error,"done",answer.state);
             if (turn==0) {
@@ -118,7 +162,7 @@ public class HarnessReplayTest {
         for (String model:new String[]{"fixture-future","deepseek-v4-pro"}) {
             app.account.selected=model;
             assertTrue(chat.send(routes,"fixture-future".equals(model) ? "测试新模型" : "核对恢复",null));
-            await("routed output cap",()->!chat.busy);
+            await("routed output cap",()->!chat.busy());
             java.util.List<History.Message> rows=app.history.messages(routes);
             History.Message answer=rows.get(rows.size()-1);
             assertEquals(model+" "+answer.error,"done",answer.state);

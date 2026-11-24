@@ -58,6 +58,9 @@ public final class DeviceSmoke extends Instrumentation {
                 DeviceContext test=new DeviceContext(this,activity);
                 try { test.run(Integer.parseInt(options.getString("fixturePort"))); }
                 finally { stage=test.stage; }
+            } else if ("delete".equals(mode)) {
+                DeviceDeletion test=new DeviceDeletion(this,activity);
+                try { test.run(); } finally { stage=test.stage; }
             } else if ("login-init".equals(mode)) loginInit();
             else if ("runtime".equals(mode)) stopRuntime();
             else history("reopen".equals(mode));

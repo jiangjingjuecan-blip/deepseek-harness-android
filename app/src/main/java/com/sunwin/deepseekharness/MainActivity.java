@@ -118,6 +118,7 @@ public final class MainActivity extends Activity {
         View rule=new View(this); rule.setBackgroundColor(LINE); root.addView(rule,new LinearLayout.LayoutParams(-1,1));
         content=a.column(); root.addView(content,new LinearLayout.LayoutParams(-1,0,1));
         if (chat) buildChat();
+        else if ("history".equals(screen)) showHistory();
         update();
     }
     private void update() {
@@ -127,7 +128,7 @@ public final class MainActivity extends Activity {
         } else if (!app.account.loading && !app.account.pending() && !"".equals(app.account.phase)) openLogin=false;
         subtitle.setVisibility(View.GONE);
         switch (screen) {
-            case "history": header.setText("历史对话"); showHistory(); break;
+            case "history": header.setText("历史对话"); break;
             case "settings": header.setText("设置"); showSettings(); break;
             default:
                 History.Chat chat=app.history.chat(chatId); header.setText(chat.title);
@@ -223,7 +224,7 @@ public final class MainActivity extends Activity {
     }
     private void updateSend() {
         if (send==null) return;
-        boolean can=!app.chat.busy && (!draft.trim().isEmpty() || photo!=null);
+        boolean can=!app.chat.busy() && (!draft.trim().isEmpty() || photo!=null);
         send.setEnabled(can); send.setAlpha(can?1f:.44f);
     }
     private void send() {
@@ -246,7 +247,7 @@ public final class MainActivity extends Activity {
     private LinearLayout card(LinearLayout page) {
         LinearLayout card=a.column(); card.setBackground(a.shape(WHITE,18,LINE)); a.pad(card,4,3); page.addView(card,a.size(-1,-2)); return card;
     }
-    private void row(LinearLayout card,String left,String right,Runnable action) {
+    private View row(LinearLayout card,String left,String right,Runnable action) {
         LinearLayout line=a.row(); a.pad(line,14,11);
         TextView text=a.text(left,16,INK,false); line.addView(text,new LinearLayout.LayoutParams(0,-2,1));
         if (!right.isEmpty()) line.addView(a.text(right,14,DIM,false));
@@ -254,11 +255,30 @@ public final class MainActivity extends Activity {
             ImageView next=new ImageView(this); next.setImageResource(R.drawable.ic_chevron); next.setColorFilter(DIM);
             line.addView(next,a.size(21,21)); a.buttonStyle(line,WHITE,13); line.setOnClickListener(v->action.run());
         }
-        line.setMinimumHeight(a.dp(52)); card.addView(line,a.size(-1,-2));
+        line.setMinimumHeight(a.dp(52)); card.addView(line,a.size(-1,-2)); return line;
     }
     private void showHistory() {
         LinearLayout page=page(), list=card(page);
-        for (History.Chat chat:app.history.list()) row(list,chat.title,chat.id==chatId?"当前":"",()->selectChat(chat.id));
+        for (History.Chat chat:app.history.list()) {
+            View line=row(list,chat.title,chat.id==chatId?"当前":"",()->selectChat(chat.id));
+            line.setOnLongClickListener(v->{
+                // A handled long click gives one system haptic before the posted dialog opens.
+                v.post(()->confirmDelete(chat.id));
+                return true;
+            });
+        }
+    }
+    private void confirmDelete(long id) {
+        if (isFinishing() || isDestroyed() || !"history".equals(screen)) return;
+        new AlertDialog.Builder(this).setTitle("删除对话").setNegativeButton("取消",null)
+            .setPositiveButton("删除",(dialog,which)->{
+                try {
+                    long next=app.chat.delete(id,chatId);
+                    if (next!=chatId) selectChat(next); else showHistory();
+                } catch (android.database.sqlite.SQLiteException e) {
+                    app.log.add(Diagnostics.Event.CHAT_DELETE_FAILED); toast("删除失败");
+                }
+            }).show();
     }
     private void showSettings() {
         LinearLayout page=page(); groupName(page,"DeepSeek 账号"); LinearLayout account=card(page);

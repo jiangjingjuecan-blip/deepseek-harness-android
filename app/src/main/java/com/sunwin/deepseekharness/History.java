@@ -3,6 +3,8 @@ package com.sunwin.deepseekharness;
 import android.content.*;
 import android.database.Cursor;
 import android.database.sqlite.*;
+import java.io.*;
+import java.nio.file.*;
 import java.util.*;
 
 final class History extends SQLiteOpenHelper {
@@ -14,20 +16,26 @@ final class History extends SQLiteOpenHelper {
         final long id; final String role, text, photo, state, error;
         Message(Cursor c) { id=c.getLong(0); role=c.getString(1); text=c.getString(2); photo=c.getString(3); state=c.getString(4); error=c.getString(5); }
     }
-    History(Context context) { super(context, "chats.db", null, 3); }
+    private final File filesDir;
+    History(Context context) { super(context, "chats.db", null, 4); filesDir=context.getFilesDir(); }
     @Override public void onConfigure(SQLiteDatabase db) { db.setForeignKeyConstraintsEnabled(true); }
     @Override public void onCreate(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE chat(id INTEGER PRIMARY KEY, title TEXT NOT NULL, remote TEXT UNIQUE, updated INTEGER NOT NULL)");
         db.execSQL("CREATE TABLE message(id INTEGER PRIMARY KEY, chat INTEGER NOT NULL REFERENCES chat(id), role TEXT NOT NULL, body TEXT NOT NULL, photo TEXT, state TEXT NOT NULL, error TEXT)");
         db.execSQL("CREATE INDEX chat_messages ON message(chat,id)");
         createMeter(db);
+        createPhotoCleanup(db);
     }
     private static void createMeter(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE context_meter(chat INTEGER PRIMARY KEY REFERENCES chat(id) ON DELETE CASCADE, model TEXT NOT NULL, used INTEGER NOT NULL, capacity INTEGER NOT NULL)");
     }
+    private static void createPhotoCleanup(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE photo_cleanup(photo TEXT PRIMARY KEY NOT NULL)");
+    }
     @Override public void onUpgrade(SQLiteDatabase db,int oldVersion,int newVersion) {
         if (oldVersion < 2) db.execSQL("ALTER TABLE message ADD COLUMN error TEXT");
         if (oldVersion < 3) createMeter(db);
+        if (oldVersion < 4) createPhotoCleanup(db);
     }
     void meter(long id,String model,ContextUsage usage) {
         getWritableDatabase().execSQL("INSERT OR REPLACE INTO context_meter(chat,model,used,capacity) VALUES(?,?,?,?)",
@@ -64,6 +72,53 @@ final class History extends SQLiteOpenHelper {
     Chat chat(long id) {
         try (Cursor c = getReadableDatabase().rawQuery("SELECT id,title,remote FROM chat WHERE id=?",args(id))) {
             return c.moveToFirst() ? new Chat(c) : null;
+        }
+    }
+
+    long delete(long id,long current,Diagnostics log) {
+        SQLiteDatabase db=getWritableDatabase();
+        db.beginTransaction();
+        try {
+            // Allocate the replacement while the old row still exists. SQLite can reuse row IDs.
+            if (current==id) current=create();
+            db.execSQL("INSERT OR IGNORE INTO photo_cleanup(photo) SELECT photo FROM message WHERE chat=? AND photo IS NOT NULL",
+                    new Object[]{id});
+            db.delete("message","chat=?",args(id));
+            db.delete("chat","id=?",args(id)); // context_meter cascades with its chat.
+            db.setTransactionSuccessful();
+        } finally { db.endTransaction(); }
+        cleanDeletedPhotos(log);
+        return current;
+    }
+    void cleanDeletedPhotos(Diagnostics log) {
+        // A crash after the chat commit leaves the candidates here. Check surviving references
+        // under a write lock before unlinking, including when replaying cleanup at startup.
+        try {
+            SQLiteDatabase db=getWritableDatabase();
+            db.beginTransaction();
+            try {
+                List<String> pending=new ArrayList<>();
+                try (Cursor c=db.rawQuery("SELECT photo FROM photo_cleanup",null)) {
+                    while (c.moveToNext()) pending.add(c.getString(0));
+                }
+                if (!pending.isEmpty()) unlinkOrphans(db,pending,log);
+                db.setTransactionSuccessful();
+            } finally { db.endTransaction(); }
+        } catch (SQLiteException | IOException | InvalidPathException e) { log.add(Diagnostics.Event.PHOTO_DELETE_FAILED); }
+    }
+    private void unlinkOrphans(SQLiteDatabase db,List<String> pending,Diagnostics log) throws IOException {
+        Path base=filesDir.getCanonicalFile().toPath(), dir=base.resolve("photos");
+        Set<Path> kept=new HashSet<>();
+        try (Cursor c=db.rawQuery("SELECT DISTINCT photo FROM message WHERE photo IS NOT NULL",null)) {
+            while (c.moveToNext()) kept.add(base.resolve(c.getString(0)).toFile().getCanonicalFile().toPath());
+        }
+        for (String reference:pending) {
+            try {
+                Path path=base.resolve(reference).toFile().getCanonicalFile().toPath();
+                if (path.startsWith(dir) && !path.equals(dir) && !kept.contains(path) && Files.isRegularFile(path))
+                    Files.deleteIfExists(path);
+                db.delete("photo_cleanup","photo=?",new String[]{reference});
+            } catch (IOException | InvalidPathException e) { log.add(Diagnostics.Event.PHOTO_DELETE_FAILED); }
         }
     }
     void link(long id,String remote) {

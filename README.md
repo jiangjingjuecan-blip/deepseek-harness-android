@@ -10,9 +10,9 @@ DeepSeek 助手是一款 Android 聊天客户端。它通过 PRoot 在手机上�
 
 适用于 Android 10 及以上、支持 `arm64-v8a` 的手机。
 
-1. 在项目的 GitHub Release 中找到 `v0.1.3-test`，下载附件 `deepseek-harness-test.apk`。[发布页](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/tag/v0.1.3-test) · [下载 APK](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/download/v0.1.3-test/deepseek-harness-test.apk)
-2. 核对文件大小 **131,176,105 字节（125.10 MiB）**。在电脑上可运行 `sha256sum deepseek-harness-test.apk`，预期 SHA-256 为 `0f78a9dd71a850842f4eba0f8850fb4ac527fe994751b5dd46e6f24c6a90d697`。
-3. 在手机上点开 APK 安装。已安装 v0.1.0-test 至 v0.1.2-test 的手机可直接覆盖升级，保留本地对话。如果系统询问，允许当前浏览器或文件管理器安装此应用。
+1. 在项目的 GitHub Release 中找到 `v0.1.4-test`，下载附件 `deepseek-harness-test.apk`。[发布页](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/tag/v0.1.4-test) · [下载 APK](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/download/v0.1.4-test/deepseek-harness-test.apk)
+2. 核对文件大小 **131,181,049 字节（125.10 MiB）**。在电脑上可运行 `sha256sum deepseek-harness-test.apk`，预期 SHA-256 为 `6d8c2207abf7fde85532420135ce41b4f32d0f63aed7ac76e54471c4c184d0fc`。
+3. 在手机上点开 APK 安装。已安装 v0.1.0-test 至 v0.1.3-test 的手机可直接覆盖升级，保留本地对话。如果系统询问，允许当前浏览器或文件管理器安装此应用。
 
 ## 在手机上试用
 
@@ -20,6 +20,7 @@ DeepSeek 助手是一款 Android 聊天客户端。它通过 PRoot 在手机上�
 2. 点「登录 DeepSeek」，在浏览器完成授权后返回应用。在设置中查看登录状态、可用模型和余额。需要再次打开授权页时，可点「继续登录」或「备用登录」。
 3. 发一个简短问题，观察回复是否逐段出现，再追问上一轮的内容。选一张相册图片或拍一张照片，把问题和图片一起发出。
 4. 进入历史列表，新建对话。关闭再打开应用，从列表回到旧对话并续聊。在设置中点「充值」，确认打开 DeepSeek 官方页面。
+5. 在「历史对话」中长按一条对话，点「删除」可清除本机消息、上下文用量和仅该对话使用的照片。删除当前对话会打开一个新的空对话。
 
 模拟器和回放测试的结果，以及仍需在 iQOO 11 上验证的项目，见[安装包验证记录](docs/TEST_NOTES.md)。
 

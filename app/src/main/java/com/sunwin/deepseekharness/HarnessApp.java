@@ -19,6 +19,7 @@ public final class HarnessApp extends Application {
         log=new Diagnostics(getNoBackupFilesDir());
         history=new History(this);
         int recovered=history.recover();
+        history.cleanDeletedPhotos(log);
         if (recovered>0) log.add(Diagnostics.Event.CHAT_RECOVERED_AFTER_RESTART,recovered);
         account=new Account(this); chat=new ChatEngine(this,Guest.CHAT_DIR);
     }

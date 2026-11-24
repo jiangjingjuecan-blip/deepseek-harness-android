@@ -1,5 +1,13 @@
 # 安卓安装包验证
 
+## v0.1.4-test
+
+- 签名 APK 的 versionCode 为 5，versionName 为 0.1.4，包名为 `com.sunwin.deepseekharness`，架构为 `arm64-v8a`。文件大小为 **131,181,049 字节（125.10 MiB）**，SHA-256 为 `6d8c2207abf7fde85532420135ce41b4f32d0f63aed7ac76e54471c4c184d0fc`。[下载 APK](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/download/v0.1.4-test/deepseek-harness-test.apk)
+- `apksigner` 验证了 APK v2 签名，`zipalign` 检查通过。本版与 v0.1.0-test 至 v0.1.3-test 四个公开 APK 的签名证书 SHA-256 均为 `b849e51b4f5a8691ffca6eecbae2592fc28afe06acccc148c52b67f2abc2079e`。
+- 主机分别以 `HARNESS_REPLAY=x86_64` 和 `HARNESS_REPLAY=arm64-v8a` 运行发布版单元测试，各通过 22 项，跳过 0 项。测试核对了消息、用量记录、独占和共享照片、删除当前对话后的空对话、事务回滚和进程重启后的照片清理。新建 DSH 会话的应答延迟至本地删除后送达时，即使 SQLite 已复用旧行号，新对话也保留原有状态。[删除回归测试](../app/src/test/java/com/sunwin/deepseekharness/HistoryDeletionTest.java)
+- 隔离的官方 DSH 0.2.2-rc.2 在 `workspace/follow` 上发回归档事件，归档集合只有被删会话的 ID。Web 接口 `workspace/archiveSession` 支持停止活动，DSH 的原生会话日志仍保留。运行时离线和服务拒绝归档两条路径均验证了本地删除和短诊断。本版测试的模型请求全部由回环夹具响应。[归档回放](../app/src/test/java/com/sunwin/deepseekharness/HarnessReplayTest.java) · [DSH 归档接口](https://github.com/deepseek-ai/deepseek-harness/blob/ddac9676/packages/api/workspace-controller/src/commands.ts#L154-L183) · [DSH 日志存储说明](https://github.com/deepseek-ai/deepseek-harness/blob/ddac9676/packages/session/session-persistence-jsonl/README.zh.md#L167)
+- Android 10 ARM64 模拟器 `harnessarm` 先在 0.1.3 中写入测试对话，再覆盖安装签名的 0.1.4，按原 ID 重新打开并核对正文。仪器测试注入触屏按下、持按和松开事件，验证轻点打开、长按后弹窗只有「删除对话」「取消」「删除」、取消保留原文、删除非当前对话保留当前选择，以及删除当前对话后进入用量为 0% 的空对话。强制停止并重开应用后，当前 ID 仍指向同一空对话，界面显示 0%。设备内 APK 的 SHA-256 与发布文件一致。模拟器使用本机 SQLite 样例，测试期间停用客机 DSH。实体振感与 iQOO 真机均未经本次测试。[模拟器删除测试](../app/src/androidTest/java/com/sunwin/deepseekharness/DeviceDeletion.java)
+
 ## v0.1.3-test
 
 - `com.sunwin.deepseekharness` 的 versionCode 为 4，versionName 为 0.1.3，仅包含 arm64-v8a。APK 为 **131,176,105 字节（125.10 MiB）**，SHA-256 为 `0f78a9dd71a850842f4eba0f8850fb4ac527fe994751b5dd46e6f24c6a90d697`。

@@ -50,7 +50,7 @@ final class DeviceContext {
                     stage="manual-menu";
                     onUi(()->click("上下文用量 <1%"));
                     clickMenu();
-                    await("manual-complete",()->!app.chat.busy);
+                    await("manual-complete",()->!app.chat.busy());
                 }
                 String question=questions[i];
                 stage="send-"+i;
@@ -58,7 +58,7 @@ final class DeviceContext {
                     EditText input=(EditText)find(activity.getWindow().getDecorView(),null);
                     input.setText(question); click("发送");
                 });
-                await("reply-"+i,()->!app.chat.busy);
+                await("reply-"+i,()->!app.chat.busy());
                 List<History.Message> rows=app.history.messages(id);
                 if (rows.size()!=2*(i+1) || !"done".equals(rows.get(rows.size()-1).state)) throw new AssertionError();
                 if (i==6 || i==7) {
