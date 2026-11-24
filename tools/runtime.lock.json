@@ -4,10 +4,6 @@
       "url": "https://files.pythonhosted.org/packages/52/7d/2e3718bd653d61f244d77ded9122efd924d45e03c5c74a035af26adb9285/deepseek_harness_runtime_bin-0.2.2rc2-py3-none-manylinux_2_28_aarch64.whl",
       "sha256": "dc8f6e2c463c9c174b8fbafa394ada62351ff16b9febde4b90dca6b57f1b4e84"
     },
-    "proot": {
-      "url": "https://packages.termux.dev/apt/termux-main/pool/main/p/proot/proot_5.1.107.102_aarch64.deb",
-      "sha256": "10a394b585c2fc2b2c8502544f4e5f1be581dc8bfff79e8ba62f16207423e030"
-    },
     "libandroid-shmem": {
       "url": "https://packages.termux.dev/apt/termux-main/pool/main/liba/libandroid-shmem/libandroid-shmem_0.7_aarch64.deb",
       "sha256": "0da3a24d558b93c92bcf8d611e0826a99ff96e396b148e6cdf33b47c47c57ff6"
@@ -41,10 +37,6 @@
     "wheel": {
       "url": "https://files.pythonhosted.org/packages/95/37/ba779ea8e90daa84f9f1ea9982521e9e1f6d99223857efc6f9cf739b4b85/deepseek_harness_runtime_bin-0.2.2rc2-py3-none-manylinux_2_28_x86_64.whl",
       "sha256": "3c8f15a7a92b12857032995ec5dbcc105f192c36218e9b6bb2c5b54b4ee7db17"
-    },
-    "proot": {
-      "url": "https://packages.termux.dev/apt/termux-main/pool/main/p/proot/proot_5.1.107.102_x86_64.deb",
-      "sha256": "2497064226c15971be8131c7facead94a06c225347796326a383c832dca57758"
     },
     "libandroid-shmem": {
       "url": "https://packages.termux.dev/apt/termux-main/pool/main/liba/libandroid-shmem/libandroid-shmem_0.7_x86_64.deb",
@@ -83,6 +75,10 @@
     "gcc-14-base": {
       "url": "https://deb.debian.org/debian/pool/main/g/gcc-14/gcc-14-base_14.2.0-19_amd64.deb",
       "sha256": "5b6825de4263824b78c4c51f6476414f3b4e89c2ab63e81dc8b9b5501e867cf6"
+    },
+    "proot-source": {
+      "url": "https://github.com/termux/proot/archive/refs/tags/v5.1.107.102.zip",
+      "sha256": "30d12a6e2cc4147123756ff58edea262d3083bbc238c12d0ab9b39e3d1c40852"
     }
   }
 }

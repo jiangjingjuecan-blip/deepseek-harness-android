@@ -79,7 +79,7 @@ final class ChatEngine {
         } catch (Exception e) {
             failure=ChatFailure.caught(e,stage);
             ChatFailure stopped=api.stoppedBecause();
-            if (stopped!=null && stage!=READ_PHOTO && failure.code.isEmpty()) {
+            if (stopped!=null && stage!=READ_PHOTO && failure.code.isEmpty() && failure.access==null) {
                 failure=stopped;
             }
         } finally {

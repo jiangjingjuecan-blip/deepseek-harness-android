@@ -82,12 +82,44 @@ public class CoreTest {
     @Test public void rpcAndMuxErrorsRetainTheirSafeCause() throws Exception {
         JSONObject response=Wire.obj("rpcId","r","result",Wire.obj("ok",false,
                 "error",Wire.obj("code","gateway/internal","message","EACCES private fixture text")));
-        assertEquals("gateway/internal · EACCES",assertThrows(ChatFailure.class,()->Wire.rpcValue("r",response)).getMessage());
+        ChatFailure denied=assertThrows(ChatFailure.class,()->Wire.rpcValue("r",response));
+        assertEquals("EACCES · DSH 访问受限",denied.getMessage());
+        assertTrue(denied.diagnostic().contains("syscall=unknown path=unknown errno=EACCES(13)"));
+        assertEquals("HTTP 403 · 账号鉴权失败",ChatFailure.remote(Wire.obj("code","AUTH","message","Permission denied"),403,"").getMessage());
+        assertTrue(ChatFailure.remote(Wire.obj("message","EACCES"),500,"").diagnostic().contains("HTTP 500"));
         assertEquals("HTTP 403",ChatFailure.remote(null,403,"本机 HTTP 请求失败").getMessage());
         JSONObject frame=Wire.obj("streamId","reply","type","error","error",Wire.obj("code","session/not-found"));
         assertEquals("DSH 会话不存在",assertThrows(ChatFailure.class,()->Wire.followItem(frame)).getMessage());
         frame.put("type","end");
         assertEquals("订阅提前结束",assertThrows(ChatFailure.class,()->Wire.followItem(frame)).getMessage());
+    }
+    @Test public void permissionContextSurvivesRpcTurnAndExportWithoutUserData() throws Exception {
+        AccessFault.binding("libdsh_flock.so","/opt/test/bin/glibc/system.node");
+        String parent="/home/dsh/.dsh/sessions/--home-dsh-chat--/private-id/";
+        ChatFailure link=ChatFailure.remote(Wire.obj("code","UNKNOWN","message","EACCES: permission denied, link '"+
+                parent+"session.v4.jsonl.abcd.tmp' -> '"+parent+"session.v4.jsonl'"),0,"");
+        assertTrue(link.getMessage().contains("建链接"));
+        assertTrue(link.diagnostic().contains("process=DSH_NODE syscall=link path="));
+        assertTrue(link.diagnostic().contains("dest=/home/dsh/.dsh/sessions/--home-dsh-chat--/…/session.v4.jsonl"));
+        ChatFailure terminal=ChatFailure.turn(Wire.obj("kind","error","error",Wire.obj("message","EACCES")),link);
+        assertSame(link,terminal);
+        JSONObject inner=Wire.obj("errno",-13,"syscall","mmap","path","/opt/test/bin/glibc/system.node");
+        ChatFailure mapped=ChatFailure.remote(Wire.obj("details",Wire.obj("cause",inner)),0,"");
+        assertEquals("EACCES · 加载 /opt/test/bin/glibc/system.node",mapped.getMessage());
+        Diagnostics log=new Diagnostics(temp.getRoot());
+        ChatFailure identity=log.childLine("DSH_CHECK\tlock_identity\t/home/dsh/.dsh/sessions\t0");
+        assertEquals("文件锁不符 · /home/dsh/.dsh/sessions",identity.getMessage());
+        assertTrue(identity.diagnostic().contains("process=GUEST_CHECK syscall=statx"));
+        log.interrupted(ChatFailure.Stage.REPLY,link);
+        log.childLine("proot error: execve(\"/bin/sh\"): Permission denied");
+        log.childLine("harness: /data/app/private-id/lib/arm64/libdsh_flock.so: can't execute: Permission denied");
+        log.attemptFailed(ChatFailure.remote(Wire.obj("code","EACCES","syscall","write","path","/home/dsh/chat/private-id"),0,""));
+        ByteArrayOutputStream out=new ByteArrayOutputStream(); log.export(out);
+        String text=out.toString("UTF-8");
+        assertTrue(text.contains("process=PROOT syscall=execve path=/bin/sh errno=EACCES(13)"));
+        assertTrue(text.contains("process=SUPERVISOR syscall=execve path=nativeLibraryDir/libdsh_flock.so"));
+        assertTrue(text.contains("syscall=write path=/home/dsh/chat/…"));
+        assertFalse(text.contains("private-id")); assertFalse(text.contains("abcd"));
     }
     @Test public void lastAttemptSuppliesMissingErrorButExplicitEndReasonWins() throws Exception {
         Reply reply=new Reply("mine");

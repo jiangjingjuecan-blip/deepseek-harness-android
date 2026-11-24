@@ -22,20 +22,31 @@ final class ChatFailure extends IOException {
             "session/not-found session/model-unavailable session/attachment-invalid session/workspace-attach-failed workspace/not-found " +
             "MODEL_DOES_NOT_SUPPORT_IMAGES").split(" ")));
     private static final Set<String> SYSTEM_CODES = new LinkedHashSet<>(Arrays.asList(
-            "ENOSYS", "EACCES", "EPERM", "ENOENT", "ENOSPC", "ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED",
+            "ENOSYS", "ENOENT", "ENOSPC", "ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED",
             "ECONNRESET", "ENETUNREACH", "EHOSTUNREACH", "ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT",
             "CERTIFICATE_VERIFY_FAILED", "CERT_HAS_EXPIRED", "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
             "UNABLE_TO_GET_ISSUER_CERT_LOCALLY", "DEPTH_ZERO_SELF_SIGNED_CERT", "ERR_TLS_CERT_ALTNAME_INVALID",
             "ERR_DLOPEN_FAILED"));
     final String code;
+    final AccessFault access;
+    final int httpStatus;
 
     ChatFailure(String fixedLabel) { this(fixedLabel, ""); }
-    private ChatFailure(String label, String code) { super(label); this.code = code; }
-    String diagnostic() { return code.isEmpty() ? getMessage() : getMessage() + " [" + code + "]"; }
+    private ChatFailure(String label, String code) { this(label,code,null); }
+    ChatFailure(AccessFault access) { this(access.label(),access.errno,access); }
+    private ChatFailure(String label,String code,AccessFault access) { this(label,code,access,0); }
+    private ChatFailure(String label,String code,AccessFault access,int status) {
+        super(label); this.code=code; this.access=access; this.httpStatus=status;
+    }
+    String diagnostic() {
+        return getMessage()+(code.isEmpty()?"":" ["+code+"]")+(httpStatus==0?"":" HTTP "+httpStatus)
+                +(access==null?"":" "+access.diagnostic());
+    }
 
     static ChatFailure remote(JSONObject error, int http, String fallback) {
         String rawCode = error == null ? "" : error.optString("code");
         String code = CODES.contains(rawCode) ? rawCode : "";
+        AccessFault access=AccessFault.remote(error);
         if (http == 0 && rawCode.matches("HTTP_[1-5][0-9]{2}")) http = Integer.parseInt(rawCode.substring(5));
         JSONObject details = error == null ? null : error.optJSONObject("details");
         String reason = details == null ? "" : details.optString("reason");
@@ -43,6 +54,7 @@ final class ChatFailure extends IOException {
         if (error != null) {
             int status = error.optInt("status", 0);
             if (http == 0 && status >= 100 && status <= 599) http = status;
+            if (access!=null) return new ChatFailure(access.label(),code,access,http);
             String message = rawCode + " " + error.optString("message") + " " + reason;
             for (String system : SYSTEM_CODES) {
                 if (message.contains(system)) { note = system; break; }
@@ -50,7 +62,7 @@ final class ChatFailure extends IOException {
             if (note.isEmpty() && (code.isEmpty() || "UNKNOWN".equals(code) || "gateway/internal".equals(code))) {
                 String detail = message.toLowerCase(Locale.ROOT);
                 if (detail.contains("insufficient balance") || detail.contains("insufficient quota")) note = "账号额度不足";
-                else if (detail.contains("permission denied")) note = "文件权限不足";
+                else if (detail.contains("permission denied")) note = "访问被拒绝";
                 else if (detail.contains("fetch failed")) note = "网络请求失败";
                 else if (detail.contains("timed out")) note = "请求超时";
             }
@@ -88,6 +100,9 @@ final class ChatFailure extends IOException {
         switch (reason.optString("kind")) {
             case "error":
                 ChatFailure terminal = remote(reason.optJSONObject("error"), 0, "");
+                if (terminal.access!=null && attempt!=null && attempt.access!=null
+                        && terminal.access.errno.equals(attempt.access.errno)
+                        && attempt.access.specificity()>terminal.access.specificity()) return attempt;
                 if (!terminal.getMessage().isEmpty()) return terminal;
                 return attempt != null ? attempt : new ChatFailure("DSH 回合出错");
             case "completed": return new ChatFailure("回合结束但没有正文");
@@ -114,6 +129,8 @@ final class ChatFailure extends IOException {
 
     static ChatFailure caught(Throwable e, Stage stage) {
         if (e instanceof ChatFailure) return (ChatFailure)e;
+        AccessFault access=AccessFault.caught(e);
+        if (access!=null) return new ChatFailure(access);
         if (e instanceof SocketTimeoutException) return new ChatFailure(
                 stage == Stage.FOLLOW || stage == Stage.REPLY ? "WebSocket 超时" : "本机 HTTP 超时");
         if (e instanceof ConnectException) return new ChatFailure("无法连接本机 DSH");

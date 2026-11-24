@@ -8,6 +8,7 @@ import android.graphics.*;
 import android.net.Uri;
 import android.os.*;
 import android.provider.MediaStore;
+import android.provider.Settings;
 import android.text.*;
 import android.view.*;
 import android.view.inputmethod.InputMethodManager;
@@ -51,10 +52,21 @@ public final class MainActivity extends Activity {
             openLogin=state.getBoolean("launch");
         }
         startRuntime(); draw();
+    }
+    @Override public void onWindowFocusChanged(boolean focused) {
+        super.onWindowFocusChanged(focused);
+        // Window focus returns after the notification dialog. Never stack two
+        // system prompts or repeat either one after refusal/activity recreation.
+        if (!focused || !visible || isFinishing()) return;
         if (Build.VERSION.SDK_INT>=33 && !preferences().getBoolean("notificationAsked",false)
                 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED) {
             preferences().edit().putBoolean("notificationAsked",true).apply();
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS},NOTIFICATIONS);
+        } else if (!preferences().getBoolean("batteryAsked",false)
+                && !getSystemService(PowerManager.class).isIgnoringBatteryOptimizations(getPackageName())) {
+            preferences().edit().putBoolean("batteryAsked",true).apply();
+            Intent request=new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,Uri.parse("package:"+getPackageName()));
+            try { startActivity(request); } catch (ActivityNotFoundException|SecurityException ignored) { }
         }
     }
     private void startRuntime() { startForegroundService(new Intent(this,HarnessService.class)); }
@@ -118,7 +130,7 @@ public final class MainActivity extends Activity {
     private String status() {
         switch (app.serviceState) {
             case "starting": return "正在启动";
-            case "failed": return "服务启动失败";
+            case "failed": return app.serviceFailure.isEmpty()?"服务启动失败":app.serviceFailure;
             case "stopped": return "服务已停止";
             default: return app.account.label();
         }

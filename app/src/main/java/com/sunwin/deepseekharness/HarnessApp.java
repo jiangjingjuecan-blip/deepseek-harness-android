@@ -12,6 +12,7 @@ public final class HarnessApp extends Application {
     ChatEngine chat;
     volatile Loopback api;
     volatile String serviceState="starting";
+    volatile String serviceFailure="";
     private Runnable listener;
     @Override public void onCreate() {
         super.onCreate();

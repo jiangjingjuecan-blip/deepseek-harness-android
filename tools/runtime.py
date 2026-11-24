@@ -5,13 +5,16 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import shutil
+import struct
 import subprocess
 import sys
 import tarfile
 import tempfile
 import urllib.request
 import zipfile
+import brotli
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCK = ROOT / 'tools/runtime.lock.json'
@@ -40,6 +43,94 @@ def download(item):
     return key, path
 
 
+def build_proot(archive, base, termux, libs):
+    # Retain the installed separate loader. Its pokedata offset is compiled
+    # into PRoot, so build and ship both from the same upstream sources.
+    ndk = Path(os.environ.get('ANDROID_HOME', '/home/box/Android/sdk')) / 'ndk/27.3.13750724'
+    llvm = ndk / 'toolchains/llvm/prebuilt/linux-x86_64/bin'
+    triple = 'aarch64' if DSH_ARCH == 'arm64' else 'x86_64'
+    cc = llvm / f'{triple}-linux-android29-clang'
+    if not cc.is_file():
+        raise RuntimeError("Install Android NDK 27.3.13750724 in ANDROID_HOME/ndk")
+    with zipfile.ZipFile(archive) as z:
+        z.extractall(base)
+    source = base / 'proot-5.1.107.102'
+    subprocess.run(['patch', '--batch', '-p1', '-i', ROOT/'tools/proot-statx.patch'], cwd=source, check=True)
+    env = dict(os.environ, CC=str(cc), STRIP=str(llvm/'llvm-strip'), OBJDUMP=str(llvm/'llvm-objdump'),
+               OBJCOPY=str(llvm/'llvm-objcopy'), GIT='true', PROOT_WITH_LIBANDROID_SHMEM='true',
+               PROOT_UNBUNDLE_LOADER='/run/apk-libs',
+               CPPFLAGS=f'-I{termux}/include -DARG_MAX=131072 -DVERSION=\\"5.1.107.102\\"',
+               LDFLAGS=f'-L{termux}/lib -Wl,-z,max-page-size=16384')
+    subprocess.run(['make', '-C', source/'src', '-j4', 'proot'], env=env, check=True)
+    for src, name in [('proot', 'libproot.so'), ('loader/loader', 'libproot_loader.so')]:
+        subprocess.run([llvm/'llvm-strip', '-o', libs/name, source/'src'/src], check=True)
+    subprocess.run(['patchelf', '--replace-needed', 'libtalloc.so.2', 'libtalloc.so', libs/'libproot.so'], check=True)
+
+
+def stage_pkg_addons(libs, bindings):
+    # The pinned pkg SEA has two length-prefixed assets. Its dlopen wrapper copies
+    # the top-level package (the entire scope for a scoped package) under pkg/<digest>.
+    # Bind every native sibling there, including libraries needed via $ORIGIN.
+    exe = (libs / 'libdsh.so').read_bytes()
+
+    def asset(name):
+        pos = exe.rindex(name) + len(name)
+        if struct.unpack_from('<Q', exe, pos - len(name) - 8)[0] != len(name):
+            raise ValueError('Unexpected SEA asset header')
+        size, = struct.unpack_from('<Q', exe, pos)
+        return memoryview(exe)[pos + 8:pos + 8 + size]
+
+    manifest = json.loads(asset(b'__pkg_manifest__').tobytes())
+    archive = asset(b'__pkg_archive__')
+    if manifest['compression'] != 2 or manifest['symlinks']:
+        raise ValueError('Review native cache layout for this pkg version')
+    modules = {}
+    expected_system = f'@deepseek-ai/node-addon-system-linux-{DSH_ARCH}/bin/glibc/system.node'
+    for path, (offset, length) in manifest['offsets'].items():
+        if not re.search(r'(?:\.node|\.so(?:\.\d+)*)$', path):
+            continue
+        rel = path.removeprefix('/node/node_modules/')
+        if rel == path or '..' in Path(rel).parts:
+            raise ValueError('Unexpected native module path')
+        data = brotli.decompress(archive[offset:offset + length])
+        if not data.startswith(b'\x7fELF') or len(data) != manifest['stats'][path]['size']:
+            raise ValueError('Invalid native asset')
+        sha = hashlib.sha256(data).hexdigest()
+        if rel == expected_system:
+            name = 'libdsh_flock.so'
+        elif rel.startswith('node-addon-require-builtin-'):
+            name = 'libdsh_builtin.so'
+            if digest(libs / name) != sha:
+                raise ValueError('Embedded builtin differs from the pinned prebuild')
+        else:
+            name = 'libpkg_' + sha[:16] + '.so'
+        (libs / name).write_bytes(data)
+        modules[rel] = (name, sha)
+    if expected_system not in modules:
+        raise ValueError('Missing session lock addon')
+    for addon, (_, sha) in modules.items():
+        if addon.endswith('.node'):
+            scope = addon.split('/')[0]
+            for path, (name, _) in modules.items():
+                if path.split('/')[0] == scope:
+                    bindings.append(f'{name}\t/opt/pkg-cache/pkg/{sha}/{path}')
+
+    # pkg otherwise copies and hashes the whole @deepseek-ai JS scope on the
+    # first session lock. The lock addon has no package sidecars. Its exact ELF
+    # already occupies newPath via the binding above. Keep pkg's hash, path
+    # selection and dlopen, including its original behavior for other addons.
+    # The worker bootstrap is a quoted copy. Preserve SEA offsets in both.
+    skip_flock_copy = (b'if(moduleBaseName!=="system.node")cpRecursive(modulePkgFolder,'
+                       b'path.join(tmpFolder,path.basename(modulePkgFolder)));')
+    for newline in (b'\n', b'\\n'):
+        original = (b'var destFolder = path.join(tmpFolder, path.basename(modulePkgFolder));'
+                    + newline + b'            cpRecursive(modulePkgFolder, destFolder);')
+        if exe.count(original) != 1 or len(skip_flock_copy) > len(original):
+            raise ValueError('Review pkg native loader in the pinned DSH wheel')
+        exe = exe.replace(original, skip_flock_copy.ljust(len(original)))
+    (libs / 'libdsh.so').write_bytes(exe)
+
+
 def stage(target, files):
     libs = target / 'jni' / ABI
     assets = target / 'assets'
@@ -59,11 +150,8 @@ def stage(target, files):
             if path.suffix == '.deb':
                 subprocess.run(['dpkg-deb', '-x', path, base], check=True)
         termux = base / 'data/data/com.termux/files/usr'
-        shutil.copyfile(termux / 'bin/proot', libs / 'libproot.so')
-        # Android only installs lib*.so entries. Keep the non-versioned dependency in that directory.
-        subprocess.run(['patchelf', '--replace-needed', 'libtalloc.so.2', 'libtalloc.so', libs / 'libproot.so'], check=True)
-        for src, name in [('libexec/proot/loader','libproot_loader.so'), ('lib/libtalloc.so.2','libtalloc.so'),
-                          ('lib/libandroid-shmem.so','libandroid-shmem.so')]:
+        build_proot(files['proot-source'], base, termux, libs)
+        for src, name in [('lib/libtalloc.so.2','libtalloc.so'), ('lib/libandroid-shmem.so','libandroid-shmem.so')]:
             shutil.copyfile(termux / src, libs / name)
         shutil.copyfile(termux / 'share/doc/libandroid-shmem/copyright', notices / 'libandroid-shmem')
         (notices / 'termux-packages.txt').write_text(
@@ -86,6 +174,13 @@ def stage(target, files):
                     'libresolv.so.2', 'libstdc++.so.6', 'libgcc_s.so.1', 'libutil.so.1']:
             guest(linux / lib, '/lib/' + lib, 'libguest_' + lib.split('.')[0] + '.so')
         guest(next(base.rglob('bin/busybox')), '/bin/busybox', 'libguest_busybox.so')
+        probe = base / 'guest-check'
+        compiler = ('aarch64' if DSH_ARCH == 'arm64' else 'x86_64') + '-linux-gnu-gcc'
+        # A static first tracee can check the guest interpreter before any guest
+        # program asks PRoot to load it.
+        subprocess.run([compiler, '-std=c11', '-Os', '-Wall', '-Wextra', '-Werror', '-static', '-s',
+                        ROOT/'tools/guest_check.c', '-o', probe], check=True)
+        guest(probe, '/bin/guest-check', 'libguest_check.so')
         if ABI == 'x86_64':
             shim = base / 'rename.so'
             subprocess.run(['x86_64-linux-gnu-gcc', '-shared', '-fPIC', '-O2', '-Wl,-z,relro,-z,now',
@@ -111,6 +206,7 @@ def stage(target, files):
                 shutil.copyfile(copy, notices / copy.parent.name)
         for license_name in ['GPL-2', 'GPL-3', 'LGPL-2.1', 'LGPL-3']:
             shutil.copyfile(Path('/usr/share/common-licenses') / license_name, notices / license_name)
+    stage_pkg_addons(libs, bindings)
     (assets / 'bindings.tsv').write_text('\n'.join(bindings) + '\n')
     (assets / 'runtime-arch').write_text(DSH_ARCH)
     for path in libs.iterdir():
@@ -120,7 +216,8 @@ def stage(target, files):
 def main():
     (CACHE / 'archives').mkdir(parents=True, exist_ok=True)
     target = CACHE / ABI
-    fp = digest(LOCK) + digest(Path(__file__)) + digest(ROOT / 'tools/guest_rename.c')
+    fp = ''.join(digest(path) for path in (LOCK, Path(__file__), ROOT/'tools/guest_rename.c',
+                                          ROOT/'tools/guest_check.c', ROOT/'tools/proot-statx.patch'))
     stamp = target / 'complete'
     if stamp.exists() and stamp.read_text() == fp:
         return

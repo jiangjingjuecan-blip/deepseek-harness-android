@@ -42,7 +42,7 @@ public final class HarnessService extends Service {
                 .addAction(new Notification.Action.Builder(null,"停止",stop).build()).build());
         networks=getSystemService(ConnectivityManager.class);
         networks.registerDefaultNetworkCallback(dnsChanges);
-        app.serviceState="starting"; app.log.add(SERVICE_START); app.changed();
+        app.serviceFailure=""; app.serviceState="starting"; app.log.add(SERVICE_START); app.changed();
         new Thread(this::runGuest,"dsh-process").start();
     }
     @Override public int onStartCommand(Intent intent,int flags,int id) {
@@ -52,6 +52,7 @@ public final class HarnessService extends Service {
     private void runGuest() {
         Process p=null;
         Loopback api=null;
+        ChatFailure startupFailure=null;
         Account.Listing listing=Account.Listing.UNKNOWN;
         try {
             synchronized (lock) {
@@ -73,17 +74,27 @@ public final class HarnessService extends Service {
                         api.bootstrap(match.group(2)); deadline.cancel(false);
                         synchronized (lock) {
                             if (stopped) break;
+                            startupFailure=null;
                             app.log.add(RUNTIME_READY); app.connected(api);
                         }
                     } else {
                         Account.Listing reported=Account.Listing.fromLine(line);
-                        if (reported==null) { app.log.childLine(line); continue; }
+                        if (reported==null) {
+                            ChatFailure detail=app.log.childLine(line);
+                            if (detail!=null && api==null) startupFailure=detail;
+                            continue;
+                        }
                         listing=reported; app.log.catalog(reported);
                         if (api!=null) { api.listing=reported; app.changed(); }
                     }
                 }
             } finally { deadline.cancel(false); }
-        } catch (Exception e) { app.log.add(RUNTIME_ERROR); }
+        } catch (Exception e) {
+            AccessFault fault=AccessFault.caught(e);
+            if (e instanceof ChatFailure) startupFailure=(ChatFailure)e;
+            else if (fault!=null) startupFailure=new ChatFailure(fault);
+            if (startupFailure!=null) app.log.runtimeFailure(startupFailure); else app.log.add(RUNTIME_ERROR);
+        }
         finally {
             if (p!=null) {
                 if (p.isAlive()) terminate(p);
@@ -91,6 +102,7 @@ public final class HarnessService extends Service {
             }
             synchronized (lock) {
                 if (!stopped) {
+                    if (startupFailure!=null) app.serviceFailure=startupFailure.getMessage();
                     failed=true;
                     app.main.post(this::stopSelf);
                 }

@@ -1,5 +1,11 @@
 # 安卓安装包验证
 
+## v0.1.2-test
+
+- 发布文件为 `dist-apk/deepseek-harness-test.apk`，大小 **131,166,048 字节（125.09 MiB）**，SHA-256 为 `76f7e924d40eba2d1cb1ffbaa6c3fc183b6da90257d179775444cd3fcab3f531`。[下载 APK](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/download/v0.1.2-test/deepseek-harness-test.apk)
+- 包名为 `com.sunwin.deepseekharness`，versionCode 3，versionName 0.1.2，minSdk 29，targetSdk 34。合并清单启用了原生库提取。APK 包含 30 个 AArch64 ELF，客机清单有 31 个绑定。已验证 APK v2 签名及 ZIP 对齐，签名证书 SHA-256 与前两个公开测试版一致，为 `b849e51b4f5a8691ffca6eecbae2592fc28afe06acccc148c52b67f2abc2079e`。
+- 15 项宿主机测试全部通过，含官方 ARM64 运行时在 QEMU 下与本地模拟推理服务的图文、续聊、错误回放，以及权限错误脱敏、旧对话升级和错误绑定回归。ARM64 模拟器用最终签名包完成启动自检，实际拒绝了应用数据中的可执行文件。对可写会话目录关闭硬链接兼容时测得 `linkat = EACCES(13)`，最终配置下，解压实际会话日志得到 17 条记录，包含「你好」和回合结束事件。[首条消息错误记录](EACCES.md)
+
 ## v0.1.1-test
 
 应用包名为 `com.sunwin.deepseekharness`，版本为 `0.1.1`，版本号从 1 增至 2。签名证书 SHA-256 与 v0.1.0-test 一致，旧版可以覆盖升级。SQLite 迁移测试已从旧表读回历史，再写入带短错误的新消息。
@@ -22,9 +28,8 @@
 
 ## 在 iQOO 11 上验证
 
-
 1. 将 APK 传到手机，点开安装。如系统询问，允许当前文件管理器安装未知应用。
-2. 打开「DeepSeek 助手」，允许通知，等「正在启动」变为「未登录」。若出现「重新启动」，点一下再试。
+2. 打开「DeepSeek 助手」，在系统确认页选择通知和电池优化设置。若启动失败，记下界面的短原因，可到设置导出诊断日志。
 3. 点「登录 DeepSeek」，在系统浏览器完成授权后返回应用。需要重试时，到设置中点「继续登录」或「备用登录」。
 4. 在设置查看登录状态、可用模型及余额。发送一个简短问题，留意文字是否逐段出现，再追问上一轮的内容。
 5. 点相册选一张图，在输入框问图中内容后发送。也可点相机拍照，再发一轮。

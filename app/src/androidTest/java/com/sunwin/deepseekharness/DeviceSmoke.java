@@ -3,12 +3,20 @@ package com.sunwin.deepseekharness;
 import android.app.*;
 import android.content.*;
 import android.os.*;
+import android.system.*;
 import android.view.*;
 import android.widget.TextView;
 import org.json.*;
 import java.io.ByteArrayOutputStream;
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.util.*;
 import java.net.*;
+import java.lang.Process;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.*;
+import okhttp3.*;
 
 /** Separate instrumentation APK for an empty emulator. No test account or test entry point in the release. */
 public final class DeviceSmoke extends Instrumentation {
@@ -22,6 +30,16 @@ public final class DeviceSmoke extends Instrumentation {
         try {
             if (!"ranchu".equals(Build.HARDWARE) && !Build.HARDWARE.contains("goldfish")) throw new AssertionError();
             String mode=options.getString("scenario","history");
+            if ("self-check".equals(mode)) {
+                checkBindings(result);
+                result.putString("passed",mode); finish(Activity.RESULT_OK,result); return;
+            }
+            if ("session".equals(mode)) {
+                app=(HarnessApp)getTargetContext().getApplicationContext();
+                app.startForegroundService(new Intent(app,HarnessService.class));
+                materializeSession(result);
+                result.putString("passed",mode); finish(Activity.RESULT_OK,result); return;
+            }
             activity=(MainActivity)startActivitySync(new Intent(getTargetContext(),MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             app=(HarnessApp)activity.getApplication();
             if ("login-init".equals(mode)) loginInit();
@@ -31,8 +49,88 @@ public final class DeviceSmoke extends Instrumentation {
         } catch (Throwable e) {
             result.putString("failed",stage);
             // Throwable messages may contain a URL. Only export the local stage and exception type.
-            result.putString("kind",e.getClass().getSimpleName()); finish(Activity.RESULT_CANCELED,result);
+            result.putString("kind",e.getClass().getSimpleName());
+            if (e instanceof ChatFailure) result.putString("detail",((ChatFailure)e).diagnostic());
+            finish(Activity.RESULT_CANCELED,result);
         }
+    }
+    private void checkBindings(Bundle result) throws Exception {
+        Context base=getTargetContext();
+        Path isolated=Files.createTempDirectory(base.getCacheDir().toPath(),"device-smoke-");
+        Context env=new ContextWrapper(base) {
+            @Override public File getNoBackupFilesDir() { return isolated.toFile(); }
+        };
+        try {
+            stage="app-data-exec";
+            Path installed=Paths.get(base.getApplicationInfo().nativeLibraryDir);
+            Path copy=Files.copy(installed.resolve("libguest_busybox.so"),isolated.resolve("busybox"));
+            if (!copy.toFile().setExecutable(true,true)) throw new AssertionError();
+            try {
+                Process p=new ProcessBuilder(copy.toString(),"true").start();
+                p.waitFor(); throw new AssertionError("app data exec allowed");
+            } catch (IOException e) {
+                AccessFault denial=AccessFault.caught(e);
+                if (denial==null || !"EACCES".equals(denial.errno)) throw e;
+                result.putString("app-data-execve","EACCES");
+            }
+            Path addon=Files.copy(installed.resolve("libdsh_flock.so"),isolated.resolve("system.node"));
+            FileDescriptor fd=Os.open(addon.toString(),OsConstants.O_RDONLY,0);
+            try {
+                long page=Os.mmap(0,1,OsConstants.PROT_READ|OsConstants.PROT_EXEC,OsConstants.MAP_PRIVATE,fd,0);
+                Os.munmap(page,1);
+                result.putString("app-data-exec-mmap","allowed");
+            } catch (ErrnoException e) { result.putString("app-data-exec-mmap",OsConstants.errnoName(e.errno)); }
+            finally { Os.close(fd); }
+            Guest guest=new Guest(env);
+            stage="bound-exec";
+            ProcessBuilder pb=guest.prepare();
+            List<String> args=pb.command();
+            int tail=args.indexOf("--")+1;
+            args.subList(tail,args.size()).clear();
+            args.add("/bin/busybox"); args.add("true");
+            checkProcess(pb,null);
+            stage="legacy-session-link";
+            int linkOption=args.indexOf("--link2symlink");
+            args.remove(linkOption);
+            checkProcess(pb,"EACCES");
+            result.putString("legacy-linkat","EACCES");
+            args.add(linkOption,"--link2symlink");
+            stage="unbound-executable";
+            // Leave a valid +x ELF behind after omitting only the rg bind. The
+            // production checker must reject its inode before attempting mmap.
+            int rg=0;
+            while (!args.get(rg).startsWith(installed+"/libdsh_rg.so:")) rg++;
+            String target=args.get(rg).substring(args.get(rg).indexOf(':')+1).replace("!","");
+            args.subList(rg-1,rg+1).clear();
+            Path misplaced=Files.copy(copy,isolated.resolve("linux"+target));
+            if (!misplaced.toFile().setExecutable(true,true)) throw new AssertionError();
+            checkProcess(pb,"BIND_MISMATCH");
+            result.putString("missing-bind","BIND_MISMATCH");
+        } finally {
+            try (java.util.stream.Stream<Path> files=Files.walk(isolated)) {
+                for (Path path:(Iterable<Path>)files.sorted(Comparator.reverseOrder())::iterator) Files.deleteIfExists(path);
+            }
+        }
+    }
+    private void checkProcess(ProcessBuilder pb,String expectedCode) throws Exception {
+        Process p=pb.start();
+        boolean expected=false;
+        try (BufferedReader lines=new BufferedReader(new InputStreamReader(p.getInputStream(),StandardCharsets.UTF_8))) {
+            for (String line;(line=lines.readLine())!=null;) {
+                if ("DSH_CHECK_OK".equals(line)) expected=expectedCode==null;
+                else if (line.startsWith("DSH_CHECK\t")) {
+                    ChatFailure failure=((HarnessApp)getTargetContext().getApplicationContext()).log.childLine(line);
+                    expected=failure!=null && failure.code.equals(expectedCode) &&
+                            (("BIND_MISMATCH".equals(expectedCode) && failure.access.path.endsWith("-rg")) ||
+                            ("EACCES".equals(expectedCode) && "linkat".equals(failure.access.syscall)
+                                    && failure.getMessage().startsWith("EACCES · 建链接 ")
+                                    && failure.diagnostic().contains("process=GUEST_CHECK syscall=linkat")
+                                    && failure.diagnostic().contains("errno=EACCES(13)")));
+                    if (!expected && failure!=null) throw failure;
+                }
+            }
+            if (p.waitFor()!=(expectedCode==null?0:125) || !expected) throw new AssertionError();
+        } finally { p.getOutputStream().close(); }
     }
     private View find(View v,String name) {
         if (name.contentEquals(v.getContentDescription()==null?"":v.getContentDescription())) return v;
@@ -76,6 +174,56 @@ public final class DeviceSmoke extends Instrumentation {
         stage="signed-out";
         if (!"signed-out".equals(api.rpc("account/getState",Wire.obj()).getString("status"))) throw new AssertionError();
         return api;
+    }
+    private void materializeSession(Bundle result) throws Exception {
+        Loopback api=ready();
+        stage="create-session";
+        String id=api.rpc("session/create",Wire.request(Wire.obj("cwd",Guest.CHAT_DIR,"agentPreset","phone-chat")))
+                .getString("sessionId");
+        stage="first-session-write";
+        api.rpc("session/rename",Wire.request(Wire.obj("sessionId",id,"title","设备自检")));
+        String request=UUID.randomUUID().toString();
+        BlockingQueue<String> frames=new LinkedBlockingQueue<>();
+        WebSocket socket=api.follow(new WebSocketListener() {
+            @Override public void onOpen(WebSocket ws,Response response) { ws.send(Wire.follow(id).toString()); }
+            @Override public void onMessage(WebSocket ws,String text) { frames.offer(text); }
+        });
+        try {
+            stage="session-snapshot";
+            String snapshot=frames.poll(25,TimeUnit.SECONDS);
+            if (snapshot==null || !"snapshot".equals(Wire.followItem(new JSONObject(snapshot)).optString("type"))) throw new AssertionError();
+            Path session=app.getNoBackupFilesDir().toPath().resolve("linux/home/dsh/.dsh/sessions/--home-dsh-chat--").resolve(id);
+            long baseline=journalBytes(session);
+            stage="first-prompt";
+            api.rpc("session/prompt",Wire.prompt(id,request,"你好",null));
+            stage="session-journal";
+            Reply reply=new Reply(request);
+            long until=SystemClock.elapsedRealtime()+90000;
+            do {
+                String next=frames.poll(250,TimeUnit.MILLISECONDS);
+                if (next!=null) reply.accept(Wire.followItem(new JSONObject(next)));
+                if (reply.failure!=null && reply.failure.access!=null) throw reply.failure;
+                // The first compressed frame can hold only a header. Wait for the
+                // turn to end and for a later append before stopping the service.
+                long bytes=journalBytes(session);
+                if (baseline==0) baseline=bytes;
+                if (reply.ended && bytes>baseline) {
+                    result.putString("journal","appended");
+                    return;
+                }
+            } while (SystemClock.elapsedRealtime()<until);
+            if (reply.failure!=null) throw reply.failure;
+            throw new AssertionError();
+        } finally { socket.close(1000,""); }
+    }
+    private static long journalBytes(Path session) throws IOException {
+        if (Files.isDirectory(session)) try (DirectoryStream<Path> files=Files.newDirectoryStream(session)) {
+            for (Path file:files) {
+                if (file.getFileName().toString().matches("session(?:\\.v[0-9]+)?\\.jsonl(?:\\.zstd)?")
+                        && Files.isRegularFile(file)) return Files.size(file);
+            }
+        }
+        return 0;
     }
     private void stopRuntime() throws Exception {
         Loopback api=ready();

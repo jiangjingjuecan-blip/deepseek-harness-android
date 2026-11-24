@@ -150,7 +150,8 @@ def run():
         cmd += [str(binary),'web','--patch',str(ROOT/'app/src/main/assets/chat.yml'),
                 '--patch',str(patch),'--no-open','--host','127.0.0.1','--port','0']
         env={'HOME':str(root),'DSH_HOME':str(home),'PATH':'/usr/bin:/bin','TMPDIR':str(root),
-             'DSH_TELEMETRY_DISABLED':'1','NARB_NATIVE_CACHE_DIR':str(sysroot/'opt/native-cache')}
+             'DSH_TELEMETRY_DISABLED':'1','NARB_NATIVE_CACHE_DIR':str(sysroot/'opt/native-cache'),
+             'PKG_NATIVE_CACHE_PATH':str(sysroot/'opt/pkg-cache'),'NARB_DISABLE_LOCAL_BUILD':'1'}
         with subprocess.Popen(cmd, env=env,cwd=root,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
                               stdin=subprocess.DEVNULL,start_new_session=True) as proc:
             try:

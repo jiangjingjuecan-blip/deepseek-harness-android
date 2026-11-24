@@ -7,16 +7,19 @@ DeepSeek Harness
 
   官方 deepseek-harness-runtime-bin 0.2.2rc2（DSH 0.2.2-rc.2）由
   DeepSeek 发布，Copyright (c) 2026 DeepSeek，MIT。APK 使用 wheel 中的
-  Linux 可执行文件和配套的 ripgrep 搜索程序。wheel 的原始许可和上游第三方声明随 APK
+  Linux 可执行文件和配套的 ripgrep 搜索程序。Android 打包脚本调整了 pkg 主进程和
+  worker 对 system.node 的复制步骤，并将原始原生模块交由安装器提取。
+  wheel 的原始许可和上游第三方声明随 APK
   保存在 assets/licenses/dsh-LICENSE 和 assets/licenses/dsh-THIRD_PARTY_NOTICES.md。
   https://github.com/deepseek-ai/deepseek-harness
 
 Termux 与原生扩展
 
-  PRoot 5.1.107.102 和配套 loader 来自 Termux 的构建。PRoot 的原作者包括
-  STMicroelectronics 的开发者，由上游和 Termux 贡献者维护。Termux 包的
-  copyright 指向 GPL-2.0。tools/runtime.py 将 PRoot 的 libtalloc.so.2
-  依赖名改为 Android 安装目录中的 libtalloc.so。
+  PRoot 5.1.107.102 和配套 loader 由 Termux 发布的源码构建，采用 GPL-2.0。
+  原作者包括 STMicroelectronics 的开发者，由上游和 Termux 贡献者维护。
+  tools/proot-statx.patch 让受限的 statx 告知客机使用普通文件属性调用。
+  tools/runtime.py 使用 Android NDK 编译两者，将 PRoot 的 libtalloc.so.2
+  依赖名改为安装目录中的 libtalloc.so。
   https://github.com/termux/proot
   https://github.com/termux/termux-packages
 
