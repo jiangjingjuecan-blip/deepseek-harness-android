@@ -65,7 +65,7 @@ public final class DeviceSmoke extends Instrumentation {
             runOnMainSync(app::changed); waitForIdleSync();
         }
         control("历史对话",true); control(title,true); control(answer,false); control("相册",false); control("拍照",false);
-        control("语音输入",false); control("发送",false);
+        control("发送",false);
     }
     private Loopback ready() throws Exception {
         stage="runtime-ready";

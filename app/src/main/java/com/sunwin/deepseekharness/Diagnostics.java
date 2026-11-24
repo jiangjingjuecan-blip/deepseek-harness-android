@@ -11,10 +11,10 @@ import java.util.regex.Pattern;
 final class Diagnostics {
     enum Event { SERVICE_START, SERVICE_STOP, RUNTIME_START, RUNTIME_READY, RUNTIME_ERROR,
         PROOT_DSH_EXIT, RUNTIME_TIMEOUT, HTTP_BOOTSTRAP, HTTP_ACCOUNT, HTTP_MODELS, HTTP_CHAT,
-        WS_OPEN, STREAM_ERROR, LOGIN_PENDING, LOGIN_EXCHANGE, LOGIN_STORED, LOGIN_CONFIRMED,
+        WS_OPEN, WS_CLOSED, LOGIN_PENDING, LOGIN_EXCHANGE, LOGIN_STORED, LOGIN_CONFIRMED,
         LOGIN_SIGNED_OUT, LOGIN_FAILED, MODEL_ERROR, BALANCE_ERROR, CHAT_COMPLETE, CHAT_INTERRUPTED,
         LOADER_ERROR, PERMISSION_ERROR, NATIVE_SIGNAL, PROCESS_ERROR, NETWORK_ERROR,
-        RUNTIME_RENAME_UNAVAILABLE, NATIVE_MODULE_ERROR, PLATFORM_HTTP }
+        RUNTIME_RENAME_UNAVAILABLE, NATIVE_MODULE_ERROR, PLATFORM_HTTP, CHAT_RECOVERED_AFTER_RESTART, MODEL_ATTEMPT_ERROR }
     private static final Pattern SIGNAL = Pattern.compile("signal (\\d{1,2})(?:\\D|$)");
     private static final Pattern HTTP_STATUS = Pattern.compile("^\\s*status:\\s*([1-5][0-9]{2}),?\\s*$");
     private final File current, previous;
@@ -42,6 +42,11 @@ final class Diagnostics {
     }
     void add(Event e) { write(e.name()); }
     void add(Event e, int number) { write(e.name() + " " + number); }
+    void interrupted(ChatFailure.Stage stage, ChatFailure failure) {
+        write(Event.CHAT_INTERRUPTED + " " + stage + " " + failure.diagnostic());
+    }
+    void attemptFailed(ChatFailure failure) { write(Event.MODEL_ATTEMPT_ERROR + " " + failure.diagnostic()); }
+    void catalog(Account.Listing source) { write("MODEL_CATALOG_" + source.name()); }
     private synchronized void write(String entry) {
         if (current.length() > 65536 && (previous.delete() || !previous.exists())) current.renameTo(previous);
         try (FileOutputStream out = new FileOutputStream(current, true)) {

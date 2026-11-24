@@ -20,27 +20,26 @@ import java.util.concurrent.*;
 import static com.sunwin.deepseekharness.Appearance.*;
 
 public final class MainActivity extends Activity {
-    private static final int PICK=20, CAMERA=21, EXPORT=22, MIC=23, NOTIFICATIONS=24;
+    private static final int PICK=20, CAMERA=21, EXPORT=22, NOTIFICATIONS=24;
     private HarnessApp app;
     private Appearance a;
-    private Dictation dictation;
     private final ExecutorService files=Executors.newSingleThreadExecutor();
     private final android.util.LruCache<String,Bitmap> thumbs=new android.util.LruCache<>(10);
     private long chatId, photoChat;
     private String screen="chat", draft="", photo, cameraPath;
-    private boolean openLogin, visible, listening;
+    private boolean openLogin, visible;
     private LinearLayout root, content, thread, intro, attachment;
     private ScrollView scroll;
     private TextView header, subtitle;
     private EditText input;
-    private ImageButton mic, send;
+    private ImageButton send;
     private final HashMap<Long,TextView> bubbles=new HashMap<>();
     private String introKey="";
     private android.content.SharedPreferences preferences() { return getSharedPreferences("ui",MODE_PRIVATE); }
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        app=(HarnessApp)getApplication(); a=new Appearance(this); dictation=new Dictation(this);
+        app=(HarnessApp)getApplication(); a=new Appearance(this);
         chatId=preferences().getLong("chat",0);
         if (app.history.chat(chatId)==null) {
             List<History.Chat> items=app.history.list();
@@ -63,7 +62,6 @@ public final class MainActivity extends Activity {
         super.onResume(); visible=true; app.listen(this::update); app.account.refresh(false); update();
     }
     @Override public void onPause() { visible=false; app.listen(null); super.onPause(); }
-    @Override public void onStop() { dictation.stop(); super.onStop(); }
     @Override public void onDestroy() { files.shutdown(); super.onDestroy(); }
     @Override public void onSaveInstanceState(Bundle b) {
         super.onSaveInstanceState(b);
@@ -80,10 +78,10 @@ public final class MainActivity extends Activity {
     }
     private void go(String page) {
         if (input!=null) getSystemService(InputMethodManager.class).hideSoftInputFromWindow(input.getWindowToken(),0);
-        dictation.stop(); screen=page; draw();
+        screen=page; draw();
     }
     private void draw() {
-        input=null; mic=null; send=null; introKey=""; bubbles.clear();
+        input=null; send=null; introKey=""; bubbles.clear();
         root=a.column(); root.setBackgroundColor(PAPER); root.setFocusableInTouchMode(true);
         setContentView(root);
         boolean chat="chat".equals(screen);
@@ -111,8 +109,9 @@ public final class MainActivity extends Activity {
             case "settings": header.setText("设置"); showSettings(); break;
             default:
                 History.Chat chat=app.history.chat(chatId); header.setText(chat.title);
-                String status=!app.account.selected.isEmpty()?app.account.selected:status();
-                subtitle.setText(status); subtitle.setVisibility(View.VISIBLE);
+                Loopback api=app.api;
+                subtitle.setText(api!=null && app.account.stored ? app.account.modelStatus(api) : status());
+                subtitle.setVisibility(View.VISIBLE);
                 renderMessages(); updateSend();
         }
     }
@@ -145,11 +144,10 @@ public final class MainActivity extends Activity {
         });
         LinearLayout tools=a.row(); composer.addView(tools);
         ImageButton gallery=a.icon(R.drawable.ic_gallery,"相册",this::gallery), camera=a.icon(R.drawable.ic_camera,"拍照",this::camera);
-        mic=a.icon(R.drawable.ic_mic,"语音输入",this::voice);
-        for (ImageButton b:new ImageButton[]{gallery,camera,mic}) { a.buttonStyle(b,WHITE,12); tools.addView(b,a.size(48,48)); }
+        for (ImageButton b:new ImageButton[]{gallery,camera}) { a.buttonStyle(b,WHITE,12); tools.addView(b,a.size(48,48)); }
         tools.addView(new View(this),new LinearLayout.LayoutParams(0,1,1));
         send=a.icon(R.drawable.ic_send,"发送",this::send); a.buttonStyle(send,BLUE,15); send.setColorFilter(WHITE);
-        tools.addView(send,a.size(48,46)); voiceState(listening);
+        tools.addView(send,a.size(48,46));
     }
     private void renderMessages() {
         List<History.Message> rows=app.history.messages(chatId);
@@ -190,7 +188,10 @@ public final class MainActivity extends Activity {
             }
             String text=m.text;
             if ("pending".equals(m.state) && text.isEmpty()) text="正在回复…";
-            if ("interrupted".equals(m.state)) text+=text.isEmpty()?"回复已中断":"\n（回复已中断）";
+            if ("interrupted".equals(m.state)) {
+                String reason=TextUtils.isEmpty(m.error)?"回复已中断":m.error;
+                text=text.isEmpty()?reason:text+"\n（"+reason+"）";
+            }
             body.setVisibility(text.isEmpty()?View.GONE:View.VISIBLE);
             if (!TextUtils.equals(text,body.getText())) body.setText(text);
         }
@@ -204,7 +205,10 @@ public final class MainActivity extends Activity {
     private void send() {
         if (app.api==null) { toast(status()); if (retryService()) startRuntime(); return; }
         if (!app.account.stored) { login(); return; }
-        if (app.account.selected.isEmpty()) { app.account.refresh(true); toast("正在获取可用模型"); return; }
+        if (app.account.selected.isEmpty()) {
+            toast(app.account.modelError.isEmpty() ? "正在获取可用模型" : app.account.modelError);
+            app.account.refresh(true); return;
+        }
         if (app.chat.send(chatId,draft.trim(),photo)) { photo=null; input.setText(""); drawAttachment(); update(); }
     }
     private boolean retryService() { return "failed".equals(app.serviceState)||"stopped".equals(app.serviceState); }
@@ -249,8 +253,11 @@ public final class MainActivity extends Activity {
         }
         if (!app.account.balance.isEmpty()) row(account,"余额",app.account.balance,null);
         row(account,"充值","",()->openExternal(Uri.parse("https://platform.deepseek.com/top_up")));
-        if (!app.account.models.isEmpty()) {
-            a.gap(page,24); groupName(page,"可用模型"); LinearLayout models=card(page);
+        Loopback api=app.api;
+        if (api!=null && app.account.stored && !app.account.modelError.isEmpty())
+            row(account,"模型",app.account.modelError,()->app.account.refresh(true));
+        if (api!=null && !app.account.models.isEmpty()) {
+            a.gap(page,24); groupName(page,api.listing.label); LinearLayout models=card(page);
             for (String name:app.account.models) row(models,name,name.equals(app.account.selected)?"已选择":"",
                     ()->{ app.account.selected=name; app.changed(); });
         }
@@ -343,25 +350,5 @@ public final class MainActivity extends Activity {
             finally { if (camera!=null) camera.delete(); }
         });
     }
-    private void voice() {
-        if (listening) { dictation.stop(); return; }
-        if (!dictation.available()) { toast("本机语音识别不可用"); return; }
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED)
-            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO},MIC);
-        else dictation.start();
-    }
-    @Override public void onRequestPermissionsResult(int req,String[] perms,int[] results) {
-        super.onRequestPermissionsResult(req,perms,results);
-        if (req==MIC) {
-            if (results.length>0 && results[0]==PackageManager.PERMISSION_GRANTED) dictation.start();
-            else toast("未获得麦克风权限");
-        }
-    }
-    void voiceState(boolean active) {
-        listening=active;
-        if (mic!=null) { mic.setColorFilter(active?BLUE:DIM); a.buttonStyle(mic,active?PALE:WHITE,12); }
-        if (input!=null) input.setHint(active?"正在听…":"输入消息");
-    }
-    void transcribed(String text) { if (input!=null) { input.append(text); input.setSelection(input.length()); } }
-    void toast(String message) { app.notice(message); }
+    private void toast(String message) { app.notice(message); }
 }

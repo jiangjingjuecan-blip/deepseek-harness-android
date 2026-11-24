@@ -73,6 +73,13 @@ class Server(BaseHTTPRequestHandler):
             return
         obj = json.loads(data)
         msgs = obj['messages']
+        if '额度回放' in json.dumps(msgs[-1], ensure_ascii=False):
+            self.server.seen.add('quota')
+            self.send_response(402)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(b'{"error":{"type":"billing_error","message":"Insufficient Balance"}}')
+            return
         first = any(m['role'] == 'user' and isinstance(m['content'], list)
                     and any(x.get('type')=='text' and '看图' in x['text'] for x in m['content'])
                     and any(x.get('source',{}).get('file_id')=='file-pixel' for x in m['content'])
@@ -159,7 +166,7 @@ def run():
                     if line.strip()=='advance':
                         server.advance.set()
                     if line.strip()=='done':
-                        return server.seen=={'early','multi','image-turn','photo'}
+                        return server.seen=={'early','multi','image-turn','photo','quota'}
             finally:
                 if proc.poll() is None:
                     os.killpg(proc.pid,signal.SIGTERM)

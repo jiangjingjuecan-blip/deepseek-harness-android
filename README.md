@@ -2,23 +2,22 @@
 
 DeepSeek 助手是一款 Android 聊天客户端。它通过 PRoot 在手机上运行 DeepSeek 官方的 ARM64 Linux 版 Harness（DSH 0.2.2-rc.2）。应用通过本机回环地址连接 Harness，由 Harness 管理登录凭据，并联网调用 DeepSeek 账号可用的模型。
 
-你可以在系统浏览器登录 DeepSeek 账号，流式查看回复，把相册或相机里的图片和问题一起发送。语音输入使用系统的本机中文识别服务，识别结果先进入输入框，可编辑后发送。对话历史保存在本机 SQLite 数据库，图片保存在应用私有目录。设置中可以切换模型、查看余额，并打开[官方充值页](https://platform.deepseek.com/top_up)。
+你可以在系统浏览器登录 DeepSeek 账号，流式查看回复，把相册或相机里的图片和问题一起发送。对话历史保存在本机 SQLite 数据库，图片保存在应用私有目录。设置中可以切换模型、查看余额，并打开[官方充值页](https://platform.deepseek.com/top_up)。
 
 ## 安装测试版
 
 适用于 Android 10 及以上、支持 `arm64-v8a` 的手机。
 
-1. 在项目的 GitHub Release 中找到 `v0.1.0-test`，下载附件 `deepseek-harness-test.apk`。[发布页](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/tag/v0.1.0-test) · [下载 APK](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/download/v0.1.0-test/deepseek-harness-test.apk)
-2. 核对文件大小 **108,234,028 字节（103.22 MiB）**。在电脑上可运行 `sha256sum deepseek-harness-test.apk`，预期 SHA-256 为 `96ca825f9455bf8bd509ed8a1536ca700364fa69d75eb8275a790923510e7a71`。
-3. 在手机上点开 APK 安装。如果系统询问，允许当前浏览器或文件管理器安装此应用。
+1. 在项目的 GitHub Release 中找到 `v0.1.1-test`，下载附件 `deepseek-harness-test.apk`。[发布页](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/tag/v0.1.1-test) · [下载 APK](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/download/v0.1.1-test/deepseek-harness-test.apk)
+2. 核对文件大小 **108,247,320 字节（103.23 MiB）**。在电脑上可运行 `sha256sum deepseek-harness-test.apk`，预期 SHA-256 为 `0f9d4a94fb36df65ff0a7bba5ac7da7f0c55c616944f841d959d812907e2a61a`。
+3. 在手机上点开 APK 安装。已安装 v0.1.0-test 的手机可直接覆盖升级，保留本地对话。如果系统询问，允许当前浏览器或文件管理器安装此应用。
 
 ## 在手机上试用
 
 1. 打开「DeepSeek 助手」，按系统提示允许通知，等待「正在启动」变为「未登录」。启动失败时，在设置中点「重新启动」。
 2. 点「登录 DeepSeek」，在浏览器完成授权后返回应用。在设置中查看登录状态、可用模型和余额。需要再次打开授权页时，可点「继续登录」或「备用登录」。
 3. 发一个简短问题，观察回复是否逐段出现，再追问上一轮的内容。选一张相册图片或拍一张照片，把问题和图片一起发出。
-4. 在支持本机中文语音识别的 Android 12 及以上手机上，点麦克风并允许录音，说一句话，核对输入框里的文字后发送。
-5. 进入历史列表，新建对话。关闭再打开应用，从列表回到旧对话并续聊。在设置中点「充值」，确认打开 DeepSeek 官方页面。
+4. 进入历史列表，新建对话。关闭再打开应用，从列表回到旧对话并续聊。在设置中点「充值」，确认打开 DeepSeek 官方页面。
 
 模拟器和回放测试的结果，以及仍需在 iQOO 11 上验证的项目，见[安装包验证记录](docs/TEST_NOTES.md)。
 

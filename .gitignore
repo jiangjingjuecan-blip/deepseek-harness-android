@@ -65,3 +65,11 @@ coverage/
 
 # 本地协作记录
 /docs/CODEX_BRIEF*.md
+
+# 单次浏览器授权和本机复现数据
+/docs/prototype/LOGIN_READY.txt
+/docs/prototype/.login-ready-*
+/docs/prototype/repro-home/
+/docs/prototype/repro-out/
+loopback.cookie
+turns-*.jsonl

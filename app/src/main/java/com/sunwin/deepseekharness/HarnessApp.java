@@ -16,8 +16,10 @@ public final class HarnessApp extends Application {
     @Override public void onCreate() {
         super.onCreate();
         log=new Diagnostics(getNoBackupFilesDir());
-        history=new History(this); history.recover();
-        account=new Account(this); chat=new ChatEngine(this);
+        history=new History(this);
+        int recovered=history.recover();
+        if (recovered>0) log.add(Diagnostics.Event.CHAT_RECOVERED_AFTER_RESTART,recovered);
+        account=new Account(this); chat=new ChatEngine(this,Guest.CHAT_DIR);
     }
     void listen(Runnable callback) { listener=callback; }
     private final Runnable notifyChange=() -> { if (listener!=null) listener.run(); };

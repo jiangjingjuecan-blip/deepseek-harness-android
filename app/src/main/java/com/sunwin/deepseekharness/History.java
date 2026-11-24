@@ -11,18 +11,24 @@ final class History extends SQLiteOpenHelper {
         Chat(Cursor c) { id=c.getLong(0); title=c.getString(1); remote=c.getString(2); }
     }
     static final class Message {
-        final long id; final String role, text, photo, state;
-        Message(Cursor c) { id=c.getLong(0); role=c.getString(1); text=c.getString(2); photo=c.getString(3); state=c.getString(4); }
+        final long id; final String role, text, photo, state, error;
+        Message(Cursor c) { id=c.getLong(0); role=c.getString(1); text=c.getString(2); photo=c.getString(3); state=c.getString(4); error=c.getString(5); }
     }
-    History(Context context) { super(context, "chats.db", null, 1); }
+    History(Context context) { super(context, "chats.db", null, 2); }
     @Override public void onConfigure(SQLiteDatabase db) { db.setForeignKeyConstraintsEnabled(true); }
     @Override public void onCreate(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE chat(id INTEGER PRIMARY KEY, title TEXT NOT NULL, remote TEXT UNIQUE, updated INTEGER NOT NULL)");
-        db.execSQL("CREATE TABLE message(id INTEGER PRIMARY KEY, chat INTEGER NOT NULL REFERENCES chat(id), role TEXT NOT NULL, body TEXT NOT NULL, photo TEXT, state TEXT NOT NULL)");
+        db.execSQL("CREATE TABLE message(id INTEGER PRIMARY KEY, chat INTEGER NOT NULL REFERENCES chat(id), role TEXT NOT NULL, body TEXT NOT NULL, photo TEXT, state TEXT NOT NULL, error TEXT)");
         db.execSQL("CREATE INDEX chat_messages ON message(chat,id)");
     }
-    @Override public void onUpgrade(SQLiteDatabase db,int oldVersion,int newVersion) { throw new IllegalStateException(); }
-    void recover() { getWritableDatabase().execSQL("UPDATE message SET state='interrupted' WHERE state='pending'"); }
+    @Override public void onUpgrade(SQLiteDatabase db,int oldVersion,int newVersion) {
+        if (oldVersion < 2) db.execSQL("ALTER TABLE message ADD COLUMN error TEXT");
+    }
+    int recover() {
+        ContentValues v = new ContentValues();
+        v.put("state", "interrupted"); v.put("error", "应用进程已重启");
+        return getWritableDatabase().update("message", v, "state='pending'", null);
+    }
     long create() {
         ContentValues v = new ContentValues(); v.put("title","新对话"); v.put("updated",System.currentTimeMillis());
         return getWritableDatabase().insertOrThrow("chat",null,v);
@@ -44,7 +50,7 @@ final class History extends SQLiteOpenHelper {
     }
     List<Message> messages(long id) {
         List<Message> items = new ArrayList<>();
-        try (Cursor c = getReadableDatabase().rawQuery("SELECT id,role,body,photo,state FROM message WHERE chat=? ORDER BY id",args(id))) {
+        try (Cursor c = getReadableDatabase().rawQuery("SELECT id,role,body,photo,state,error FROM message WHERE chat=? ORDER BY id",args(id))) {
             while (c.moveToNext()) items.add(new Message(c));
         }
         return items;
@@ -66,6 +72,9 @@ final class History extends SQLiteOpenHelper {
         } finally { db.endTransaction(); }
     }
     void update(long id,String body,String state) {
-        getWritableDatabase().execSQL("UPDATE message SET body=?,state=? WHERE id=? AND state='pending'",new Object[]{body,state,id});
+        update(id,body,state,null);
+    }
+    void update(long id,String body,String state,String error) {
+        getWritableDatabase().execSQL("UPDATE message SET body=?,state=?,error=? WHERE id=? AND state='pending'",new Object[]{body,state,error,id});
     }
 }

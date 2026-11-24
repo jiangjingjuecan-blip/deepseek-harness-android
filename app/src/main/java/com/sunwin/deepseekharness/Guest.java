@@ -11,8 +11,10 @@ import java.util.*;
 
 /** PRoot and every guest ELF are installer-owned native libraries, including the glibc loader. */
 final class Guest {
+    static final String CHAT_DIR="/home/dsh/chat";
     private final Context context;
     private final Path root, nativeDir;
+    private boolean dnsConfigured;
     Guest(Context context) {
         this.context = context;
         root = context.getNoBackupFilesDir().toPath().resolve("linux");
@@ -31,9 +33,13 @@ final class Guest {
             return reader.readLine();
         }
     }
-    void updateDns() throws IOException {
+    synchronized void initialDns() throws IOException {
+        // A default-network callback can arrive before the guest finishes staging.
+        if (dnsConfigured) return;
         ConnectivityManager networks = context.getSystemService(ConnectivityManager.class);
-        LinkProperties link = networks.getLinkProperties(networks.getActiveNetwork());
+        updateDns(networks.getLinkProperties(networks.getActiveNetwork()));
+    }
+    synchronized void updateDns(LinkProperties link) throws IOException {
         StringBuilder dns = new StringBuilder();
         if (link != null) for (InetAddress ip : link.getDnsServers()) {
             dns.append("nameserver ").append(ip.getHostAddress()).append('\n');
@@ -42,8 +48,11 @@ final class Guest {
         Path etc = root.resolve("etc");
         Files.createDirectories(etc);
         Path tmp = Files.createTempFile(etc, "resolver", ".tmp");
-        Files.write(tmp, dns.toString().getBytes(StandardCharsets.US_ASCII));
-        Files.move(tmp, etc.resolve("resolv.conf"), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        try {
+            Files.write(tmp, dns.toString().getBytes(StandardCharsets.US_ASCII));
+            Files.move(tmp, etc.resolve("resolv.conf"), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            dnsConfigured=true;
+        } finally { Files.deleteIfExists(tmp); }
     }
     Process start() throws IOException {
         String arch = readAsset("runtime-arch");
@@ -56,7 +65,7 @@ final class Guest {
         write("etc/nsswitch.conf","passwd: files\ngroup: files\nhosts: files dns\n");
         write("etc/passwd","root:x:0:0:root:/home/dsh:/bin/sh\n");
         write("etc/group","root:x:0:\n");
-        updateDns();
+        initialDns();
         for (String name : new String[]{"sh","env","id","uname","cat","ls","mkdir","pwd","which"}) {
             Path alias = root.resolve("bin").resolve(name);
             if (!Files.isSymbolicLink(alias)) Files.createSymbolicLink(alias, Paths.get("busybox"));
@@ -66,7 +75,7 @@ final class Guest {
         Path reportPath=root.resolve("home/dsh/.dsh/logs");
         if (!Files.exists(reportPath)) Files.createFile(reportPath);
         ArrayList<String> args = new ArrayList<>(Arrays.asList(nativeDir.resolve("libproot.so").toString(),
-                "--kill-on-exit", "-0", "-r", root.toString(), "-w", "/home/dsh/chat",
+                "--kill-on-exit", "-0", "-r", root.toString(), "-w", CHAT_DIR,
                 "-b", "/dev", "-b", "/proc", "-b", "/sys", "-b", "/dev/null:/home/dsh/.dsh/logs"));
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(context.getAssets().open("bindings.tsv"), StandardCharsets.UTF_8))) {
             for (String line; (line = reader.readLine()) != null;) {

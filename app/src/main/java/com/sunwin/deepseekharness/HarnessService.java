@@ -22,7 +22,11 @@ public final class HarnessService extends Service {
     private ConnectivityManager networks;
     private final ConnectivityManager.NetworkCallback dnsChanges=new ConnectivityManager.NetworkCallback() {
         @Override public void onLinkPropertiesChanged(Network network, LinkProperties link) {
-            try { guest.updateDns(); } catch (IOException e) { app.log.add(NETWORK_ERROR); }
+            setDns(link);
+        }
+        @Override public void onLost(Network network) { setDns(null); }
+        private void setDns(LinkProperties link) {
+            try { guest.updateDns(link); } catch (IOException e) { app.log.add(NETWORK_ERROR); }
         }
     };
     @Override public void onCreate() {
@@ -48,6 +52,7 @@ public final class HarnessService extends Service {
     private void runGuest() {
         Process p=null;
         Loopback api=null;
+        Account.Listing listing=Account.Listing.UNKNOWN;
         try {
             synchronized (lock) {
                 if (stopped) return;
@@ -63,13 +68,19 @@ public final class HarnessService extends Service {
                 for (String line; (line=lines.readLine())!=null;) {
                     Matcher match=LAUNCH.matcher(line);
                     if (api==null && match.matches()) {
-                        api=new Loopback(Integer.parseInt(match.group(1)),app.log);
+                        api=new Loopback(Integer.parseInt(match.group(1)),app.log,p);
+                        api.listing=listing;
                         api.bootstrap(match.group(2)); deadline.cancel(false);
                         synchronized (lock) {
                             if (stopped) break;
                             app.log.add(RUNTIME_READY); app.connected(api);
                         }
-                    } else app.log.childLine(line);
+                    } else {
+                        Account.Listing reported=Account.Listing.fromLine(line);
+                        if (reported==null) { app.log.childLine(line); continue; }
+                        listing=reported; app.log.catalog(reported);
+                        if (api!=null) { api.listing=reported; app.changed(); }
+                    }
                 }
             } finally { deadline.cancel(false); }
         } catch (Exception e) { app.log.add(RUNTIME_ERROR); }

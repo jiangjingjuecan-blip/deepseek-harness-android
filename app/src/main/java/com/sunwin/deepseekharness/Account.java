@@ -7,10 +7,25 @@ import java.util.concurrent.*;
 import static com.sunwin.deepseekharness.Diagnostics.Event.*;
 
 final class Account {
+    enum Listing {
+        UNKNOWN("模型目录待确认"), ONLINE("账号模型"), BUNDLED("内置模型目录"), CACHED("上次的模型目录");
+        final String label;
+        Listing(String label) { this.label=label; }
+
+        // DSH 0.2.2-rc.2 returns identical RPC groups for online and bundled listings.
+        // Its account provider reports the source on stderr. Retain only the fixed outcome.
+        static Listing fromLine(String line) {
+            if (!line.startsWith("[llm-deepseek-account] model listing ")) return null;
+            if (line.endsWith("using the bundled catalog")) return BUNDLED;
+            if (line.contains("keeping the previous catalog")) return CACHED;
+            if (line.contains(" loaded ") && line.endsWith(" row(s)")) return ONLINE;
+            return null;
+        }
+    }
     final HarnessApp app;
     private final ScheduledExecutorService io = Executors.newSingleThreadScheduledExecutor();
     volatile boolean stored, confirmed, loading;
-    volatile String phase = "", balance = "", selected = "";
+    volatile String phase = "", balance = "", selected = "", modelError = "";
     volatile List<String> models = Collections.emptyList();
     volatile URI authorize;
     private String attemptId = "", lastEvent = "";
@@ -20,7 +35,7 @@ final class Account {
     void disconnected() {
         io.execute(() -> {
             stored=false; confirmed=false; loading=false; phase=""; balance=""; selected=""; authorize=null;
-            models=Collections.emptyList(); detailsAt=0; lastEvent=""; app.changed();
+            models=Collections.emptyList(); modelError=""; detailsAt=0; lastEvent=""; app.changed();
         });
     }
     void refresh(boolean force) {
@@ -28,7 +43,14 @@ final class Account {
         if (api != null) io.execute(() -> {
             if (api != app.api) return;
             try { read(api, api.rpc("account/getState",Wire.obj()),force); }
-            catch (Exception e) { app.log.add(NETWORK_ERROR); if (api==app.api && pending()) schedulePoll(); }
+            catch (Exception e) {
+                if (api!=app.api) return;
+                app.log.add(NETWORK_ERROR);
+                confirmed=false; balance=""; detailsAt=0;
+                clearModels("无法读取账号状态");
+                app.changed();
+                if (pending()) schedulePoll();
+            }
         });
     }
     void signIn() { action(true); }
@@ -69,7 +91,10 @@ final class Account {
                 : ("failed".equals(phase) || "expired".equals(phase)) ? LOGIN_FAILED : LOGIN_SIGNED_OUT;
         if (!event.name().equals(lastEvent)) { app.log.add(event); lastEvent=event.name(); }
         if (!oldPhase.equals(phase) && event==LOGIN_FAILED) app.notice("登录未完成，请重试");
-        if (!stored) { balance=""; models=Collections.emptyList(); selected=""; confirmed=false; }
+        if (!stored) {
+            balance=""; clearModels(""); confirmed=false;
+            if (wasStored) api.listing=Listing.UNKNOWN;
+        }
         app.changed();
         if (pending) schedulePoll();
         if (stored && (force || !wasStored || System.currentTimeMillis()-detailsAt>45000)) {
@@ -78,8 +103,13 @@ final class Account {
                 List<String> available=Wire.models(api.rpc("session/modelCatalog",Wire.obj()));
                 if (api!=app.api) return;
                 models=available;
+                modelError=available.isEmpty() ? "账号暂无可用模型" : "";
                 if (!available.contains(selected)) selected=available.isEmpty() ? "" : available.get(0);
-            } catch (Exception e) { app.log.add(MODEL_ERROR); }
+            } catch (Exception e) {
+                if (api!=app.api) return;
+                clearModels(e instanceof ChatFailure ? e.getMessage() : "模型目录读取失败");
+                app.log.add(MODEL_ERROR);
+            }
             app.changed();
             try {
                 JSONObject profile=api.rpc("account/getProfile",Wire.obj("client",Wire.client()));
@@ -94,6 +124,14 @@ final class Account {
             } catch (Exception e) { balance=""; app.log.add(BALANCE_ERROR); }
             app.changed();
         }
+    }
+    private void clearModels(String message) {
+        models=Collections.emptyList(); selected=""; modelError=message;
+    }
+    String modelStatus(Loopback api) {
+        if (!modelError.isEmpty()) return modelError;
+        if (api.listing!=Listing.ONLINE && !selected.isEmpty()) return api.listing.label;
+        return confirmed && !selected.isEmpty() ? selected : label();
     }
     private void schedulePoll() {
         if (polling) return;

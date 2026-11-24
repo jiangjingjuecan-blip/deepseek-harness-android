@@ -14,6 +14,12 @@ final class Wire {
         return obj;
     }
     static JSONObject request(JSONObject arg) { return obj("request", arg); }
+    static JSONObject rpcValue(String id,JSONObject reply) throws ChatFailure, JSONException {
+        if (!id.equals(reply.optString("rpcId"))) throw new ChatFailure("RPC 响应标识不匹配");
+        JSONObject result=reply.getJSONObject("result");
+        if (!result.getBoolean("ok")) throw ChatFailure.remote(result.optJSONObject("error"),0,"DSH 拒绝请求");
+        return result.optJSONObject("value");
+    }
     static JSONObject client() {
         return obj("version", "0.2.2-rc.2", "locale", "zh-CN", "timezoneOffsetSeconds",
                 TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 1000);
@@ -36,7 +42,23 @@ final class Wire {
         return obj("type","open","streamId","reply","endpoint","session/follow","payload", obj("args",
                 request(obj("address", obj("kind","session","sessionId",session), "assistantStream",true,"maxMessages",4))));
     }
-    static List<String> models(JSONObject catalog) throws JSONException {
+    static JSONObject followItem(JSONObject frame) throws ChatFailure, JSONException {
+        if (!"reply".equals(frame.optString("streamId"))) throw new ChatFailure("订阅流标识不匹配");
+        switch (frame.optString("type")) {
+            case "item": return frame.getJSONObject("value");
+            case "error": throw ChatFailure.remote(frame.optJSONObject("error"),0,"DSH 订阅失败");
+            case "end": throw new ChatFailure("订阅提前结束");
+            default: throw new ChatFailure("订阅帧格式不符");
+        }
+    }
+    static List<String> models(JSONObject catalog) throws JSONException, ChatFailure {
+        if (catalog==null) throw new ChatFailure("模型目录响应为空");
+        JSONArray failures=catalog.optJSONArray("failures");
+        for (int i=0; failures!=null && i<failures.length(); i++) {
+            JSONObject failure=failures.getJSONObject(i);
+            if ("deepseek-account".equals(failure.optString("id")))
+                throw ChatFailure.remote(failure,0,"账号模型目录读取失败");
+        }
         List<String> names = new ArrayList<>();
         JSONArray groups = catalog.getJSONArray("groups");
         for (int i = 0; i < groups.length(); i++) {

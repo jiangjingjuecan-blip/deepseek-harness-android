@@ -5,7 +5,14 @@ import org.json.*;
 /** Interpret the opt-in Web follow stream. A durable assistant message replaces its provisional chunks. */
 final class Reply {
     private final StringBuilder committed=new StringBuilder(), partial=new StringBuilder();
+    private final String requestId;
+    private boolean queued;
+    private int turn=-1;
+    private String attemptId;
     boolean ended, completed;
+    ChatFailure failure, attemptFailure;
+    Reply(String requestId) { this.requestId=requestId; }
+    boolean active() { return turn>=0 && !ended; }
     String body() {
         if (partial.length()==0) return committed.toString();
         return committed.length()==0 ? partial.toString() : committed + "\n\n" + partial;
@@ -13,19 +20,42 @@ final class Reply {
     boolean accept(JSONObject item) throws JSONException {
         if ("assistant-stream".equals(item.optString("type"))) {
             JSONObject frame=item.getJSONObject("frame");
-            if ("start".equals(frame.optString("type"))) { partial.setLength(0); return true; }
+            if (!active()) return false;
+            if ("start".equals(frame.optString("type"))) {
+                if (frame.getInt("turn")!=turn) return false;
+                attemptId=frame.getString("attemptId");
+                partial.setLength(0); attemptFailure=null; return true;
+            }
+            if (attemptId==null || !attemptId.equals(frame.optString("attemptId"))) return false;
             JSONObject chunk=frame.optJSONObject("chunk");
             if (chunk!=null && "text-delta".equals(chunk.optString("type"))) {
                 partial.append(chunk.getString("text")); return true;
+            }
+            if (chunk!=null && "finish".equals(chunk.optString("type"))) {
+                JSONObject reason=chunk.optJSONObject("reason");
+                if (reason!=null && reason.optJSONObject("failure")!=null)
+                    attemptFailure=ChatFailure.remote(reason.optJSONObject("failure"),0,"模型请求失败");
             }
         }
         if (!"event".equals(item.optString("type"))) return false;
         JSONObject event=item.getJSONObject("event");
         JSONObject data=event.optJSONObject("data");
-        if (data==null) return false;
+        // In queue mode DSH records our source.rpcId in the next-turn inbox before
+        // opening the turn, even if it then fails before creating a user/message.
+        if (!active()) {
+            if ("agent/inbox/spliced".equals(event.optString("type")) && data!=null && "next-turn".equals(data.optString("target"))) {
+                JSONArray inserted=data.getJSONArray("inserted");
+                for (int i=0; i<inserted.length(); i++) {
+                    JSONObject source=inserted.getJSONObject(i).optJSONObject("source");
+                    if (source!=null && requestId.equals(source.optString("rpcId"))) queued=true;
+                }
+            } else if (queued && !ended && "turn/start".equals(event.optString("type"))) turn=event.getJSONObject("data").getInt("turn");
+            return false;
+        }
         switch (event.getString("type")) {
             case "assistant/message":
-                JSONArray parts=data.getJSONObject("message").getJSONArray("content");
+                if (event.getJSONObject("data").getInt("turn")!=turn || !"append".equals(event.optString("surfaceOp"))) return false;
+                JSONArray parts=event.getJSONObject("data").getJSONObject("message").getJSONArray("content");
                 StringBuilder full=new StringBuilder();
                 for (int i=0;i<parts.length();i++) {
                     JSONObject part=parts.getJSONObject(i);
@@ -37,8 +67,10 @@ final class Reply {
                 }
                 partial.setLength(0); return true;
             case "turn/end":
+                if (event.getJSONObject("data").getInt("turn")!=turn) return false;
                 ended=true; JSONObject reason=data.optJSONObject("reason");
                 completed=reason!=null && "completed".equals(reason.optString("kind")) && !body().isEmpty();
+                if (!completed) failure=ChatFailure.turn(reason,attemptFailure);
                 return true;
             default: return false;
         }
