@@ -1,0 +1,80 @@
+DeepSeek 助手 Android 客户端第三方声明
+
+本项目原创代码的 MIT 许可见 LICENSE。以下组件保留各自的版权和许可证。
+运行时的下载地址、架构与 SHA-256 记录在 tools/runtime.lock.json 中。
+
+DeepSeek Harness
+
+  官方 deepseek-harness-runtime-bin 0.2.2rc2（DSH 0.2.2-rc.2）由
+  DeepSeek 发布，Copyright (c) 2026 DeepSeek，MIT。APK 使用 wheel 中的
+  Linux 可执行文件和配套的 ripgrep 搜索程序。wheel 的原始许可和上游第三方声明随 APK
+  保存在 assets/licenses/dsh-LICENSE 和 assets/licenses/dsh-THIRD_PARTY_NOTICES.md。
+  https://github.com/deepseek-ai/deepseek-harness
+
+Termux 与原生扩展
+
+  PRoot 5.1.107.102 和配套 loader 来自 Termux 的构建。PRoot 的原作者包括
+  STMicroelectronics 的开发者，由上游和 Termux 贡献者维护。Termux 包的
+  copyright 指向 GPL-2.0。tools/runtime.py 将 PRoot 的 libtalloc.so.2
+  依赖名改为 Android 安装目录中的 libtalloc.so。
+  https://github.com/termux/proot
+  https://github.com/termux/termux-packages
+
+  libandroid-shmem 0.7，Copyright (c) 2013 Sergii Pylypenko、
+  2017 Fredrik Fornwall，BSD 三条款。原文见 assets/licenses/libandroid-shmem。
+  https://github.com/termux/libandroid-shmem
+
+  libtalloc 2.5.0 来自 Samba 的 talloc。库源码 talloc.c 和 talloc.h
+  使用 LGPL-3.0-or-later，Termux 二进制包的 copyright 指向 GPL-3.0。
+  https://download.samba.org/pub/talloc/talloc-2.5.0.tar.gz
+
+  node-addon-require-builtin 0.1.9 的 Linux ARM64 和 x64 GNU 平台包
+  提供对应架构的 Node 原生扩展。Copyright (c) 2026
+  node-addon-require-builtin contributors，MIT。包内 LICENSE 随 APK
+  保存在 assets/licenses/node-addon-require-builtin。
+  https://www.npmjs.com/package/node-addon-require-builtin
+
+Debian 软件包
+
+  libc6-arm64-cross / libc6-amd64-cross 2.41-11cross1 提供 GNU C Library
+  和动态加载器。主体使用 LGPL-2.1-or-later，各文件的例外和其他条款见
+  对应架构包的 copyright，随 APK 保存在 assets/licenses/ 下。
+  https://sources.debian.org/src/glibc/
+
+  libgcc-s1 和 libstdc++6 的交叉架构包 14.2.0-19cross1 提供 GCC
+  运行库。运行库使用 GPL-3.0-or-later 并附 GCC Runtime Library
+  Exception 3.1。gcc-14-base 14.2.0-19 提供打包使用的版权说明和例外全文，
+  见 assets/licenses/gcc-14-base。
+  https://sources.debian.org/src/gcc-14/
+
+  busybox-static 1.37.0-6+b9 提供 BusyBox，GPL-2.0。包的版权说明见
+  assets/licenses/busybox-static。
+  https://sources.debian.org/src/busybox/
+
+  ca-certificates 20250419+deb13u1 提供 Mozilla 根证书数据。Debian 的
+  copyright 将 mozilla/certdata.txt 列为 MPL-2.0，将 debian/* 列为
+  GPL-2.0-or-later，见 assets/licenses/ca-certificates。
+  https://sources.debian.org/src/ca-certificates/
+
+Android 客户端和构建工具
+
+  AndroidX Core 1.13.1、Browser 1.8.0 及随包的 AndroidX 依赖使用
+  Apache-2.0。涉及 Annotation、Arch Core、Collection、Concurrent Futures、
+  Interpolator、Lifecycle、ProfileInstaller、Startup、Tracing 和 VersionedParcelable。
+  https://developer.android.com/jetpack/androidx
+
+  Square 的 OkHttp 4.12.0 和 Okio、JetBrains 的 Kotlin 标准库、
+  kotlinx.coroutines 和 annotations，以及 Google Guava 的 ListenableFuture
+  接口均使用 Apache-2.0。OkHttp 携带的 Public Suffix List 数据使用
+  MPL-2.0，其声明位于 APK 的 okhttp3/internal/publicsuffix/NOTICE。
+  https://square.github.io/okhttp/
+  https://publicsuffix.org/
+
+  Gradle Wrapper 8.9 的启动脚本和 JAR 使用 Apache-2.0。脚本保留原版权头，
+  完整许可位于 gradle/wrapper/gradle-wrapper.jar 中的 META-INF/LICENSE。
+  Android Gradle Plugin 8.7.3 使用 Apache-2.0。
+  https://gradle.org/
+
+  单元测试依赖 JUnit 4.13.2（EPL-1.0）、Robolectric 4.16.1（MIT）和
+  org.json:json 20240303（该版本的 POM 标为 Public Domain）。版本声明见
+  app/build.gradle。

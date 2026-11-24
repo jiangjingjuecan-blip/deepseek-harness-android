@@ -1,0 +1,12 @@
+- insert:
+    - id: preset-phone-chat
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: phone-chat
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: 你是 DeepSeek 助手。请自然、简洁地回答用户的问题。
+              complete: true
+              includeRuntimeContext: false
