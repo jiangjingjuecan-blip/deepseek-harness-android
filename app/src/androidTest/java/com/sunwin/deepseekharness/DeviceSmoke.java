@@ -27,15 +27,18 @@ public final class DeviceSmoke extends Instrumentation {
     @Override public void onCreate(Bundle args) { super.onCreate(args); options=args; start(); }
     @Override public void onStart() {
         Bundle result=new Bundle();
+        // Instrumentation.start() can run this thread before Application.onCreate
+        // finishes removing files from interrupted imports in the previous process.
+        waitForIdleSync();
         try {
             if (!"ranchu".equals(Build.HARDWARE) && !Build.HARDWARE.contains("goldfish")) throw new AssertionError();
             String mode=options.getString("scenario","history");
-            if ("attachment-seed-v4".equals(mode)) {
-                stage="seed-v4"; seedOldPhoto();
+            if ("attachment-seed-v4".equals(mode) || "attachment-seed-v5".equals(mode)) {
+                stage=mode; seedOldPhoto(mode.endsWith("v4") ? 4 : 5);
                 result.putString("passed",mode); finish(Activity.RESULT_OK,result); return;
             }
             if ("attachment-pdf".equals(mode)) {
-                stage="native-pdf"; DeviceAttachments.pdfs(this);
+                stage="native-pdf"; DeviceAttachments.pdfs(this,filename->stage="format-"+filename);
                 result.putString("passed",mode); finish(Activity.RESULT_OK,result); return;
             }
             if ("self-check".equals(mode)) {
@@ -80,26 +83,37 @@ public final class DeviceSmoke extends Instrumentation {
             result.putString("failed",stage);
             // Throwable messages may contain a URL. Only export the local stage and exception type.
             result.putString("kind",e.getClass().getSimpleName());
+            for (StackTraceElement frame:e.getStackTrace()) {
+                if (frame.getClassName().startsWith("com.sunwin.deepseekharness.")) {
+                    result.putString("where",frame.getFileName()+" "+frame.getLineNumber()); break;
+                }
+            }
             if (e instanceof ChatFailure) result.putString("detail",((ChatFailure)e).diagnostic());
             finish(Activity.RESULT_CANCELED,result);
         }
     }
-    // Run with the published 0.1.4 target installed. Use only old schema and Android APIs.
-    private void seedOldPhoto() throws IOException {
+    // Seed a published 0.1.4 or 0.1.5 target through its own database implementation.
+    private void seedOldPhoto(int version) throws IOException {
         Context target=getTargetContext();
         try (History history=new History(target)) {
             android.database.sqlite.SQLiteDatabase db=history.getWritableDatabase();
-            if (db.getVersion()!=4) throw new AssertionError();
+            if (db.getVersion()!=version) throw new AssertionError();
             String path="photos/upgrade-"+UUID.randomUUID()+".jpg";
             File photo=new File(target.getFilesDir(),path);
             Files.createDirectories(photo.toPath().getParent());
             try (InputStream in=getContext().getAssets().open("photo.jpg")) { Files.copy(in,photo.toPath()); }
-            db.beginTransaction();
-            try {
-                db.execSQL("INSERT INTO chat(title,updated) VALUES('升级前照片',0)");
-                db.execSQL("INSERT INTO message(chat,role,body,photo,state) VALUES(last_insert_rowid(),'user','升级前照片',?,'done')",new Object[]{path});
-                db.setTransactionSuccessful();
-            } finally { db.endTransaction(); }
+            if (version==5) {
+                long id=history.create();
+                long row=history.begin(id,"升级前照片",Collections.singletonList(Attachment.photo(path)));
+                history.update(row,"升级前回复","done");
+            } else {
+                db.beginTransaction();
+                try {
+                    db.execSQL("INSERT INTO chat(title,updated) VALUES('升级前照片',0)");
+                    db.execSQL("INSERT INTO message(chat,role,body,photo,state) VALUES(last_insert_rowid(),'user','升级前照片',?,'done')",new Object[]{path});
+                    db.setTransactionSuccessful();
+                } finally { db.endTransaction(); }
+            }
         }
         // Keep system permission dialogs out of this empty emulator's interaction test.
         target.getSharedPreferences("ui",0).edit().putBoolean("notificationAsked",true).putBoolean("batteryAsked",true).commit();

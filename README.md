@@ -2,7 +2,7 @@
 
 DeepSeek 助手是一款 Android 聊天客户端。它通过 PRoot 在手机上运行 DeepSeek 官方的 ARM64 Linux 版 Harness（DSH 0.2.2-rc.2）。应用通过本机回环地址连接 Harness，由 Harness 管理登录凭据，并联网调用 DeepSeek 账号可用的模型。
 
-你可以在系统浏览器登录 DeepSeek 账号，流式查看回复。每条消息可带最多 9 张图片，支持相册多选、追加拍照和全屏看图。点「文件」可添加文本、代码、Office 文档或 PDF，由手机提取正文。对话和附件保存在应用私有目录。[附件格式与限额](docs/ATTACHMENTS.md)
+你可以在系统浏览器登录 DeepSeek 账号，流式查看回复。每条消息可带最多 9 张相册或相机照片。手机可从 Office 文档和 PDF 提取正文与图片，每份最多 10 张内嵌图，整轮最多 20 张图。点缩略图或正文中的 `[图 1]` 可全屏查看。对话和附件保存在应用私有目录。[附件格式与限额](docs/ATTACHMENTS.md)
 
 设置中可以切换模型、查看余额及充值。[官方充值页](https://platform.deepseek.com/top_up)
 
@@ -13,8 +13,8 @@ DeepSeek 助手是一款 Android 聊天客户端。它通过 PRoot 在手机上�
 适用于 Android 10 及以上、支持 `arm64-v8a` 的手机。
 
 1. 在项目的 GitHub Release 中找到 `v0.1.5-test`，下载附件 `deepseek-harness-test.apk`。[发布页](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/tag/v0.1.5-test) · [下载 APK](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/download/v0.1.5-test/deepseek-harness-test.apk)
-2. 核对文件大小 **134,285,326 字节（128.06 MiB）**。在电脑上可运行 `sha256sum deepseek-harness-test.apk`，预期 SHA-256 为 `83953c98e9b28c22c7a00112d093aa8d6fd8df9a6bd000a48ec9652d148fede0`。
-3. 在手机上点开 APK 安装。已安装 v0.1.0-test 至 v0.1.4-test 的手机可直接覆盖升级，保留本地对话。如果系统询问，允许当前浏览器或文件管理器安装此应用。
+2. 核对文件大小 **134,301,846 字节（128.08 MiB）**。在电脑上可运行 `sha256sum deepseek-harness-test.apk`，预期 SHA-256 为 `5ccab76e9e43f24c6f14038ed856d3633f6fc7c121a537abb1a7bbc51efd4a6b`。
+3. 在手机上点开 APK 安装。已安装此前 v0.1.0-test 至 v0.1.5-test 的手机可覆盖安装，保留本地对话。如果系统询问，允许当前浏览器或文件管理器安装此应用。
 
 ## 在手机上试用
 

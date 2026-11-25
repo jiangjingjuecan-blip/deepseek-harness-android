@@ -21,7 +21,7 @@ final class History extends SQLiteOpenHelper {
         }
     }
     private final File filesDir;
-    History(Context context) { super(context, "chats.db", null, 5); filesDir=context.getFilesDir(); }
+    History(Context context) { super(context, "chats.db", null, 6); filesDir=context.getFilesDir(); }
     @Override public void onConfigure(SQLiteDatabase db) { db.setForeignKeyConstraintsEnabled(true); }
     @Override public void onCreate(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE chat(id INTEGER PRIMARY KEY, title TEXT NOT NULL, remote TEXT UNIQUE, updated INTEGER NOT NULL)");
@@ -38,12 +38,12 @@ final class History extends SQLiteOpenHelper {
         db.execSQL("CREATE TABLE photo_cleanup(photo TEXT PRIMARY KEY NOT NULL)");
     }
     private static void createAttachments(SQLiteDatabase db) {
-        // A NULL message owns a compose draft. One scan can own several ordered JPEGs.
+        // A NULL message owns a compose draft. Document bodies and their ordered images share the same owner.
         db.execSQL("CREATE TABLE attachment(id INTEGER PRIMARY KEY, chat INTEGER NOT NULL REFERENCES chat(id) ON DELETE CASCADE, "+
                 "message INTEGER REFERENCES message(id) ON DELETE CASCADE, kind TEXT NOT NULL, name TEXT NOT NULL, bytes INTEGER NOT NULL)");
         db.execSQL("CREATE INDEX chat_attachments ON attachment(chat,message,id)");
         db.execSQL("CREATE TABLE attachment_file(attachment INTEGER NOT NULL REFERENCES attachment(id) ON DELETE CASCADE, "+
-                "position INTEGER NOT NULL, path TEXT NOT NULL, PRIMARY KEY(attachment,position))");
+                "position INTEGER NOT NULL, path TEXT NOT NULL, text_offset INTEGER, PRIMARY KEY(attachment,position))");
     }
     @Override public void onUpgrade(SQLiteDatabase db,int oldVersion,int newVersion) {
         if (oldVersion < 2) db.execSQL("ALTER TABLE message ADD COLUMN error TEXT");
@@ -52,9 +52,9 @@ final class History extends SQLiteOpenHelper {
         if (oldVersion < 5) {
             createAttachments(db);
             db.execSQL("INSERT INTO attachment(id,chat,message,kind,name,bytes) SELECT id,chat,id,'PHOTO','照片.jpg',0 FROM message WHERE photo IS NOT NULL");
-            db.execSQL("INSERT INTO attachment_file SELECT id,0,photo FROM message WHERE photo IS NOT NULL");
+            db.execSQL("INSERT INTO attachment_file(attachment,position,path) SELECT id,0,photo FROM message WHERE photo IS NOT NULL");
             db.execSQL("UPDATE message SET photo=NULL WHERE photo IS NOT NULL");
-        }
+        } else if (oldVersion==5) db.execSQL("ALTER TABLE attachment_file ADD COLUMN text_offset INTEGER");
     }
     void meter(long id,String model,ContextUsage usage) {
         getWritableDatabase().execSQL("INSERT OR REPLACE INTO context_meter(chat,model,used,capacity) VALUES(?,?,?,?)",
@@ -68,7 +68,7 @@ final class History extends SQLiteOpenHelper {
             }
         }
         try (Cursor c=getReadableDatabase().rawQuery(
-                "SELECT SUM(length(CAST(body AS BLOB))+16) + (SELECT COALESCE(SUM(CASE WHEN a.kind='TEXT' THEN a.bytes+8 "+
+                "SELECT SUM(length(CAST(body AS BLOB))+16) + (SELECT COALESCE(SUM(CASE WHEN a.kind='TEXT' AND f.position=0 THEN a.bytes+8 "+
                 "ELSE 1032 END + CASE WHEN a.kind!='PHOTO' AND f.position=0 THEN length(CAST(a.name AS BLOB))+20 ELSE 0 END),0) "+
                 "FROM attachment a JOIN attachment_file f ON f.attachment=a.id WHERE a.message IS NOT NULL AND a.chat=?) "+
                 "FROM message WHERE chat=?",new String[]{Long.toString(id),Long.toString(id)})) {
@@ -175,13 +175,17 @@ final class History extends SQLiteOpenHelper {
         Attachment.Kind kind=Attachment.Kind.valueOf(c.getString(column+1));
         String name=c.getString(column+2); int bytes=c.getInt(column+3);
         List<String> paths=new ArrayList<>();
-        do { paths.add(c.getString(column+4)); } while (c.moveToNext() && !c.isNull(column) && c.getLong(column)==id);
-        Attachment item=new Attachment(kind,name,bytes,paths); item.id=id;
+        List<Integer> offsets=new ArrayList<>();
+        do {
+            paths.add(c.getString(column+4));
+            if (!c.isNull(column+5)) offsets.add(c.getInt(column+5));
+        } while (c.moveToNext() && !c.isNull(column) && c.getLong(column)==id);
+        Attachment item=new Attachment(kind,name,bytes,paths,offsets); item.id=id;
         return item;
     }
     List<Attachment> draft(long chat) {
         List<Attachment> items=new ArrayList<>();
-        try (Cursor c=getReadableDatabase().rawQuery("SELECT a.id,a.kind,a.name,a.bytes,f.path FROM attachment a "+
+        try (Cursor c=getReadableDatabase().rawQuery("SELECT a.id,a.kind,a.name,a.bytes,f.path,f.text_offset FROM attachment a "+
                 "JOIN attachment_file f ON f.attachment=a.id WHERE a.chat=? AND a.message IS NULL ORDER BY a.id,f.position",args(chat))) {
             if (c.moveToFirst()) while (!c.isAfterLast()) items.add(readAttachment(c,0));
         }
@@ -190,7 +194,7 @@ final class History extends SQLiteOpenHelper {
     List<Message> messages(long id) {
         List<Message> items=new ArrayList<>();
         // One snapshot: a newly committed bubble and its thumbnails must appear together.
-        try (Cursor c=getReadableDatabase().rawQuery("SELECT m.id,m.role,m.body,m.state,m.error,a.id,a.kind,a.name,a.bytes,f.path "+
+        try (Cursor c=getReadableDatabase().rawQuery("SELECT m.id,m.role,m.body,m.state,m.error,a.id,a.kind,a.name,a.bytes,f.path,f.text_offset "+
                 "FROM message m LEFT JOIN attachment a ON a.chat=m.chat AND a.message=m.id "+
                 "LEFT JOIN attachment_file f ON f.attachment=a.id WHERE m.chat=? ORDER BY m.id,a.id,f.position",args(id))) {
             if (c.moveToFirst()) while (!c.isAfterLast()) {
@@ -209,14 +213,15 @@ final class History extends SQLiteOpenHelper {
         v.put("name",item.name); v.put("bytes",item.textBytes);
         long id=db.insertOrThrow("attachment",null,v);
         for (int i=0;i<item.paths.size();i++)
-            db.execSQL("INSERT INTO attachment_file VALUES(?,?,?)",new Object[]{id,i,item.paths.get(i)});
+            db.execSQL("INSERT INTO attachment_file(attachment,position,path,text_offset) VALUES(?,?,?,?)",
+                    new Object[]{id,i,item.paths.get(i),item.kind==Attachment.Kind.TEXT && i>0 ? item.imageOffsets.get(i-1) : null});
     }
     boolean addDraft(long chat,Attachment item) {
         SQLiteDatabase db=getWritableDatabase(); db.beginTransaction();
         try {
             if (chat(chat)==null) return false;
             List<Attachment> existing=draft(chat);
-            if (Attachment.images(existing)+item.imageCount()>Attachment.MAX_IMAGES ||
+            if ((item.kind==Attachment.Kind.PHOTO && Attachment.photos(existing)>=Attachment.MAX_PHOTOS) ||
                     (item.kind!=Attachment.Kind.PHOTO && Attachment.documents(existing)>=Attachment.MAX_DOCUMENTS)) return false;
             insertAttachment(db,chat,null,item);
             db.setTransactionSuccessful(); return true;

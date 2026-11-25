@@ -15,7 +15,8 @@ import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.*;
-import java.util.zip.*;
+import android.text.*;
+import android.text.style.ClickableSpan;
 
 final class DeviceAttachments {
     private final Instrumentation test;
@@ -55,10 +56,7 @@ final class DeviceAttachments {
 
         Path txt=Files.write(folder.resolve("便签.txt"),"设备文件正文".getBytes("UTF-8"));
         Path docx=folder.resolve("报告.docx");
-        try (ZipOutputStream zip=new ZipOutputStream(Files.newOutputStream(docx))) {
-            zip.putNextEntry(new ZipEntry("word/document.xml"));
-            zip.write("<document><p><t>设备段落</t></p></document>".getBytes("UTF-8")); zip.closeEntry();
-        }
+        try (InputStream in=test.getContext().getAssets().open("pictures.docx")) { Files.copy(in,docx); }
         result("文件",intent->multiple(Uri.fromFile(txt.toFile()),Uri.fromFile(docx.toFile())));
         await("document-draft",()->!app.imports.busy(chat) && app.history.draft(chat).size()==5);
         test.waitForIdleSync();
@@ -70,10 +68,11 @@ final class DeviceAttachments {
         require("附件已收到".equals(app.history.messages(chat).get(1).text));
         checkMessage();
     }
-    static void pdfs(Instrumentation test) throws Exception {
+    static void pdfs(Instrumentation test,Consumer<String> checking) throws Exception {
         Context app=test.getTargetContext();
         Path folder=Files.createTempDirectory(app.getCacheDir().toPath(),"pdf-test");
-        for (String filename:new String[]{"text.pdf","scan.pdf"}) {
+        for (String filename:new String[]{"text.pdf","scan.pdf","pictures.pdf","image-only.pdf","masked.pdf","pictures.docx","pictures.pptx","pictures.xlsx"}) {
+            checking.accept(filename);
             Path file=folder.resolve(filename);
             try (InputStream in=test.getContext().getAssets().open(filename)) { Files.copy(in,file); }
             Attachment item=Documents.importFile(app,Uri.fromFile(file.toFile()),2);
@@ -81,7 +80,23 @@ final class DeviceAttachments {
                 require(item.kind==Attachment.Kind.SCAN && item.imageCount()==2);
                 Bitmap page=Photos.load(app,item.paths.get(0),200);
                 require(page.getPixel(page.getWidth()/2,page.getHeight()/2)!=Color.WHITE);
-            } else require(new String(Files.readAllBytes(Attachment.file(app,item.paths.get(0)).toPath()),"UTF-8").contains("Fixture PDF text"));
+            } else if ("image-only.pdf".equals(filename)) require(item.kind==Attachment.Kind.SCAN && item.imageCount()==1);
+            else {
+                String body=new String(Files.readAllBytes(Attachment.file(app,item.paths.get(0)).toPath()),"UTF-8");
+                if ("text.pdf".equals(filename)) require(body.contains("Fixture PDF text"));
+                else if ("masked.pdf".equals(filename)) {
+                    require(item.imageCount()==1);
+                    Bitmap image=Photos.load(app,item.imagePaths().get(0),1600);
+                    try { require(Color.red(image.getPixel(20,40))>245 && Color.red(image.getPixel(180,40))<70); }
+                    finally { image.recycle(); }
+                }
+                else {
+                    require(item.imageCount()==2 && body.startsWith("[图 2]",item.imageOffsets.get(1)));
+                    Bitmap image=Photos.load(app,item.imagePaths().get(1),1600);
+                    try { require(Color.blue(image.getPixel(image.getWidth()/2,image.getHeight()/2))>180); }
+                    finally { image.recycle(); }
+                }
+            }
             for (String path:item.paths) Attachment.file(app,path).delete();
         }
     }
@@ -107,6 +122,7 @@ final class DeviceAttachments {
             });
             return seen[0];
         });
+        checkDocumentViewer();
         Instrumentation.ActivityMonitor monitor=test.addMonitor(PhotoViewer.class.getName(),null,false);
         try {
             ui(()->click(root(),"照片 1"));
@@ -119,7 +135,7 @@ final class DeviceAttachments {
                 point(photo,now,now,MotionEvent.ACTION_DOWN,.85f*w,h/2);
                 point(photo,now,now+100,MotionEvent.ACTION_MOVE,.45f*w,h/2);
                 point(photo,now,now+180,MotionEvent.ACTION_UP,.15f*w,h/2);
-                require(find(frame,"2 / 3")!=null);
+                require(find(frame,"2 / 5")!=null);
                 stage="pinch-letterbox";
                 require(!expanded(photo));
                 pinch(photo);
@@ -129,6 +145,46 @@ final class DeviceAttachments {
                 click(frame,"关闭");
             });
             test.waitForIdleSync();
+        } finally { test.removeMonitor(monitor); }
+    }
+    private void checkDocumentViewer() throws Exception {
+        await("embedded-thumbnails",()->hasBitmap("照片 4",Color.rgb(237,40,30)) && hasBitmap("照片 5",Color.rgb(35,84,221)));
+        ui(()->click(root(),"报告.docx"));
+        Instrumentation.ActivityMonitor monitor=test.addMonitor(PhotoViewer.class.getName(),null,false);
+        try {
+            await("document-marker",()->{
+                final boolean[] pressed={false};
+                ui(()->{
+                    for (View window:WindowInspector.getGlobalWindowViews()) {
+                        View candidate=find(window,"旧文件正文[图 1]原文|[图 1]|中段|[图 2]|段尾\n");
+                        if (!(candidate instanceof TextView)) continue;
+                        TextView text=(TextView)candidate;
+                        Spanned body=(Spanned)text.getText();
+                        ClickableSpan[] markers=body.getSpans(0,body.length(),ClickableSpan.class);
+                        require(markers.length==2);
+                        int offset=body.getSpanStart(markers[1])+1;
+                        Layout layout=text.getLayout();
+                        if (layout==null) continue;
+                        int line=layout.getLineForOffset(offset);
+                        float x=text.getTotalPaddingLeft()+layout.getPrimaryHorizontal(offset);
+                        float y=text.getTotalPaddingTop()+(layout.getLineTop(line)+layout.getLineBottom(line))/2f;
+                        long now=SystemClock.uptimeMillis();
+                        point(text,now,now,MotionEvent.ACTION_DOWN,x,y);
+                        point(text,now,now+45,MotionEvent.ACTION_UP,x,y);
+                        pressed[0]=true; break;
+                    }
+                });
+                return pressed[0];
+            });
+            PhotoViewer viewer=(PhotoViewer)test.waitForMonitorWithTimeout(monitor,20000);
+            require(viewer!=null); test.waitForIdleSync();
+            ui(()->{ View frame=viewer.getWindow().getDecorView(); require(find(frame,"2 / 2")!=null); click(frame,"关闭"); });
+            test.waitForIdleSync();
+            ui(()->{
+                for (View window:WindowInspector.getGlobalWindowViews()) if (find(window,"关闭")!=null) {
+                    click(window,"关闭"); break;
+                }
+            });
         } finally { test.removeMonitor(monitor); }
     }
     private boolean hasBitmap(String label,int expected) {

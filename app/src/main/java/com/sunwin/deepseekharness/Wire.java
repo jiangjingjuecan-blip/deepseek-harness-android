@@ -37,37 +37,69 @@ final class Wire {
         return null;
     }
     static JSONObject prompt(Context ctx,String session,String id,String text,List<Attachment> files,int allowance) throws IOException {
+        return prompt(ctx,session,id,text,files,allowance,Attachment.documentImageSlots(files));
+    }
+    static JSONObject prompt(Context ctx,String session,String id,String text,List<Attachment> files,int allowance,int docSlots) throws IOException {
+        if (Attachment.photos(files)>Attachment.MAX_PHOTOS || Attachment.documents(files)>Attachment.MAX_DOCUMENTS)
+            throw new IOException("attachment-limit");
+        docSlots=Math.min(docSlots,Attachment.documentImageSlots(files));
+        allowance=Math.max(0,Math.min(allowance,ContextUsage.MAX_FILE_BYTES));
         JSONArray parts=new JSONArray();
         if (!text.isEmpty()) parts.put(obj("type","text","text",text));
         // Give short documents their full length and divide the remainder between long ones.
-        List<Attachment> docs=new ArrayList<>();
-        for (Attachment item:files) if (item.kind==Attachment.Kind.TEXT) docs.add(item);
-        docs.sort(Comparator.comparingInt(item->item.textBytes));
-        Map<Attachment,Integer> limits=new IdentityHashMap<>();
+        List<Integer> docs=new ArrayList<>();
+        for (int i=0;i<files.size();i++) if (files.get(i).kind==Attachment.Kind.TEXT) docs.add(i);
+        docs.sort(Comparator.comparingInt(i->files.get(i).textBytes));
+        int[] limits=new int[files.size()];
         for (int i=0;i<docs.size();i++) {
-            Attachment item=docs.get(i);
-            int bytes=Math.min(item.textBytes,allowance/(docs.size()-i));
-            limits.put(item,bytes); allowance-=bytes;
+            int at=docs.get(i);
+            limits[at]=Math.min(files.get(at).textBytes,allowance/(docs.size()-i));
+            allowance-=limits[at];
         }
         int image=0;
-        for (Attachment item:files) {
+        for (int i=0;i<files.size();i++) {
+            Attachment item=files.get(i);
             if (item.kind==Attachment.Kind.TEXT) {
-                byte[] raw=Files.readAllBytes(Attachment.file(ctx,item.paths.get(0)).toPath());
-                int end=Math.min(raw.length,limits.get(item));
-                while (end>0 && end<raw.length && (raw[end]&0xc0)==0x80) end--;
-                String body=new String(raw,0,end,StandardCharsets.UTF_8)+(end<raw.length ? "\n…" : "");
-                parts.put(obj("type","text","text",ContextUsage.fileLabel(item.name)+body));
+                int sent=document(ctx,parts,item,limits[i],Math.min(docSlots,Attachment.MAX_EMBEDDED_IMAGES));
+                image+=sent; docSlots-=sent;
+            } else if (item.kind==Attachment.Kind.SCAN) {
+                parts.put(obj("type","text","text",ContextUsage.fileLabel(item.name)));
+                int pages=Math.min(docSlots,item.imageCount());
+                for (int p=0;p<pages;p++) addImage(ctx,parts,item.paths.get(p),item.name+" - "+(p+1)+".jpg");
+                image+=pages; docSlots-=pages;
             } else {
-                if (item.kind==Attachment.Kind.SCAN) parts.put(obj("type","text","text",ContextUsage.fileLabel(item.name)));
-                for (int page=0;page<item.paths.size();page++) {
-                    image++;
-                    String name=item.kind==Attachment.Kind.SCAN ? item.name+" - "+(page+1)+".jpg" : "照片"+image+".jpg";
-                    byte[] raw=Files.readAllBytes(Attachment.file(ctx,item.paths.get(page)).toPath());
-                    parts.put(obj("type","image","mediaType","image/jpeg","data",Base64.getEncoder().encodeToString(raw),"name",name));
-                }
+                addImage(ctx,parts,item.paths.get(0),"照片"+(++image)+".jpg");
             }
         }
         return request(obj("sessionId",session,"requestId",id,"mode","queue","content",parts));
+    }
+    private static int document(Context ctx,JSONArray parts,Attachment item,int limit,int slots) throws IOException {
+        byte[] raw=Files.readAllBytes(Attachment.file(ctx,item.paths.get(0)).toPath());
+        int end=Math.min(raw.length,limit);
+        while (end>0 && end<raw.length && (raw[end]&0xc0)==0x80) end--;
+        String body=new String(raw,0,end,StandardCharsets.UTF_8);
+        StringBuilder part=new StringBuilder(ContextUsage.fileLabel(item.name));
+        int cursor=0,sent=0;
+        for (int i=0;i<item.imageOffsets.size();i++) {
+            int at=item.imageOffsets.get(i);
+            if (at>=body.length()) break;
+            String mark=Attachment.marker(i+1);
+            part.append(body,cursor,at);
+            cursor=Math.min(at+mark.length(),body.length());
+            // Only recorded offsets designate images. Literal brackets in the source are ordinary text.
+            if (sent>=slots || !body.startsWith(mark,at)) continue;
+            parts.put(obj("type","text","text",part.append(mark).toString()));
+            addImage(ctx,parts,item.paths.get(i+1),item.name+" "+mark+".jpg");
+            sent++; part.setLength(0);
+        }
+        part.append(body,cursor,body.length());
+        if (end<raw.length) part.append("\n…");
+        if (part.length()>0) parts.put(obj("type","text","text",part.toString()));
+        return sent;
+    }
+    private static void addImage(Context ctx,JSONArray parts,String path,String name) throws IOException {
+        byte[] raw=Files.readAllBytes(Attachment.file(ctx,path).toPath());
+        parts.put(obj("type","image","mediaType","image/jpeg","data",Base64.getEncoder().encodeToString(raw),"name",name));
     }
     static JSONObject follow(String session) {
         return obj("type","open","streamId","reply","endpoint","session/follow","payload", obj("args",

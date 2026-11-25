@@ -8,21 +8,23 @@ import java.util.List;
 final class ContextUsage {
     final long used, window;
     final boolean compacted;
-    final int fileBytes;
+    final int fileBytes, documentImages;
+    // Visual tokens, the image block, and the text block after its marker.
+    static final int DOCUMENT_IMAGE_COST=1024+8+8;
     static final int MAX_FILE_BYTES=64*1024;
 
     ContextUsage(long used,long window,boolean compacted) {
-        this(used,window,compacted,0);
+        this(used,window,compacted,0,0);
     }
-    private ContextUsage(long used,long window,boolean compacted,int fileBytes) {
-        this.used=used; this.window=window; this.compacted=compacted; this.fileBytes=fileBytes;
+    private ContextUsage(long used,long window,boolean compacted,int fileBytes,int documentImages) {
+        this.used=used; this.window=window; this.compacted=compacted; this.fileBytes=fileBytes; this.documentImages=documentImages;
     }
     static long defaultWindow(String model) {
         return "deepseek-flash".equals(model) || "deepseek-v4-pro".equals(model) ? 1048576 : 65536;
     }
     static String fileLabel(String name) { return "[文件："+name+"]\n"; }
     static long estimate(String text,List<Attachment> items) {
-        long cost=16L+text.getBytes(StandardCharsets.UTF_8).length+1032L*Attachment.images(items);
+        long cost=16L+text.getBytes(StandardCharsets.UTF_8).length+1032L*Attachment.photos(items);
         for (Attachment item:items) {
             if (item.kind!=Attachment.Kind.PHOTO) cost+=8+fileLabel(item.name).getBytes(StandardCharsets.UTF_8).length;
             if (item.kind==Attachment.Kind.TEXT) cost+=4; // Room for a UTF-8 newline and ellipsis.
@@ -32,7 +34,9 @@ final class ContextUsage {
     static String argument(long base,List<Attachment> items) {
         int bytes=0, count=0;
         for (Attachment item:items) if (item.kind==Attachment.Kind.TEXT) { bytes+=item.textBytes; count++; }
-        return count==0 ? Long.toString(base) : "files "+base+" "+Math.min(bytes,MAX_FILE_BYTES)+" "+count;
+        int images=Attachment.documentImageSlots(items);
+        if (count==0 && images==0) return Long.toString(base);
+        return "files "+base+" "+Math.min(bytes,MAX_FILE_BYTES)+" "+count+(images>0 ? " "+images : "");
     }
     String percent() {
         if (used>0 && used*100.0/window<1) return "<1%";
@@ -69,10 +73,13 @@ final class ContextUsage {
             throw new ChatFailure("压缩失败");
         }
         boolean files=argument.startsWith("files ");
-        if (!text.matches("[0-9]{1,15} [1-9][0-9]{0,14} [01]"+(files ? " [0-9]{1,5}" : ""))) throw new ChatFailure("上下文响应无效");
+        String[] request=argument.split(" ");
+        boolean images=files && request.length==5;
+        if (!text.matches("[0-9]{1,15} [1-9][0-9]{0,14} [01]"+(files ? " [0-9]{1,5}" : "")+(images ? " [0-9]{1,2}" : ""))) throw new ChatFailure("上下文响应无效");
         String[] fields=text.split(" ");
         int allowance=files ? Integer.parseInt(fields[3]) : 0;
-        if (allowance>MAX_FILE_BYTES) throw new ChatFailure("上下文响应无效");
-        return new ContextUsage(Long.parseLong(fields[0]),Long.parseLong(fields[1]),"1".equals(fields[2]),allowance);
+        int slots=images ? Integer.parseInt(fields[4]) : 0;
+        if (allowance>MAX_FILE_BYTES || (images && slots>Integer.parseInt(request[4]))) throw new ChatFailure("上下文响应无效");
+        return new ContextUsage(Long.parseLong(fields[0]),Long.parseLong(fields[1]),"1".equals(fields[2]),allowance,slots);
     }
 }

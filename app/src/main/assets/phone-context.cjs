@@ -1,5 +1,6 @@
 // This preset supplies range selection. DSH owns the meter, summary call, journal
 // transaction, image projection and provider serialization.
+const DOCUMENT_IMAGE_COST = 1024 + 8 + 8
 const RECENT_TURNS = 4
 const MARGIN = 16_384
 const MARKER = 'phone-compact'
@@ -126,11 +127,12 @@ exports.apply = function apply(ctx) {
     async handler({agent, rawInput, signal, commandId}) {
       const input = rawInput.trim()
       const manual = input === 'manual'
-      const files = /^files (\d+) (\d+) ([1-4])$/.exec(input)
+      const files = /^files (\d+) (\d+) ([0-4])(?: (\d+))?$/.exec(input)
       const base = manual ? 0 : Number(files ? files[1] : input)
       const error = text => ({ kind: 'error', text })
       if (!manual && ((!files && !/^\d+$/.test(input)) || !Number.isSafeInteger(base))) return error('参数错误')
-      if (files && Number(files[2]) > 65536) return error('参数错误')
+      const images = Number(files?.[4] ?? 0)
+      if (files && (Number(files[2]) > 65536 || images > 20)) return error('参数错误')
       if (pending.has(agent)) return error('正在压缩')
       const job = { id: commandId, signal, finished: false, changed: false }
       pending.set(agent, job)
@@ -147,11 +149,11 @@ exports.apply = function apply(ctx) {
         })
         let used = pressure(ctx, session)
         // Only the new file bodies can shrink. Preserve the user's question, labels,
-        // images and enough bytes for the first code point of each text attachment.
+        // picked photos and enough bytes for the first code point of each text attachment.
         const minimum = files ? Math.min(Number(files[2]), 4 * Number(files[3])) : 0
         const desired = files ? Math.min(Number(files[2]), Math.floor(threshold / 4)) : 0
         if (!manual && base + minimum >= threshold) return error('消息过长')
-        if ((manual || used + base + desired >= threshold) && olderRange(session)) {
+        if ((manual || used + base + desired + images * DOCUMENT_IMAGE_COST >= threshold) && olderRange(session)) {
           signal.throwIfAborted()
           agent.followup({ id: job.id, role: 'user', content: [], source: {kind: MARKER} })
           await agent.whenIdle()
@@ -161,7 +163,12 @@ exports.apply = function apply(ctx) {
         }
         if (!manual && used + base + minimum >= threshold) return error('上下文过长')
         const reply = [used, window, Number(job.changed)]
-        if (files) reply.push(Math.min(desired, threshold - used - base - 1))
+        if (files) {
+          const room = threshold - used - base - 1
+          const slots = Math.min(images, Math.floor((room - minimum) / DOCUMENT_IMAGE_COST))
+          reply.push(Math.min(desired, room - slots * DOCUMENT_IMAGE_COST))
+          if (files[4] !== undefined) reply.push(slots)
+        }
         return { kind: 'success', text: reply.join(' ') }
       } catch {
         return error('压缩失败')

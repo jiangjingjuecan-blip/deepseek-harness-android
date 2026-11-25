@@ -21,13 +21,13 @@ final class DraftImporter {
                 for (Uri uri:sources) {
                     synchronized (this) { if (jobs.get(chat)!=job) return; }
                     List<Attachment> draft=app.history.draft(chat);
-                    int slots=Attachment.MAX_IMAGES-Attachment.images(draft);
+                    int slots=Attachment.MAX_PHOTOS-Attachment.photos(draft);
                     if (!document && slots<=0) { app.notice("最多 9 张图片"); break; }
                     if (document && Attachment.documents(draft)>=Attachment.MAX_DOCUMENTS) { app.notice("最多 4 个文件"); break; }
                     Attachment item=null;
                     boolean saved=false;
                     try {
-                        item=document ? Documents.importFile(app,uri,slots) : Attachment.photo(Photos.importPhoto(app,uri));
+                        item=document ? Documents.importFile(app,uri,Documents.SCAN_PAGES) : Attachment.photo(Photos.importPhoto(app,uri));
                         synchronized (this) {
                             if (jobs.get(chat)!=job) return;
                             saved=app.history.addDraft(chat,item);

@@ -10,6 +10,8 @@ import android.os.*;
 import android.provider.MediaStore;
 import android.provider.Settings;
 import android.text.*;
+import android.text.method.LinkMovementMethod;
+import android.text.style.ClickableSpan;
 import android.view.*;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.*;
@@ -373,7 +375,7 @@ public final class MainActivity extends Activity {
     }
     private List<String> imagePaths(List<Attachment> items) {
         List<String> paths=new ArrayList<>();
-        for (Attachment item:items) if (item.kind!=Attachment.Kind.TEXT) paths.addAll(item.paths);
+        for (Attachment item:items) paths.addAll(item.imagePaths());
         return paths;
     }
     private void messageFiles(LinearLayout group,List<Attachment> items) {
@@ -405,6 +407,17 @@ public final class MainActivity extends Activity {
                 runOnUiThread(()->{
                     if (isFinishing() || isDestroyed()) return;
                     TextView text=a.text(value,15,INK,false); a.pad(text,20,12); text.setTextIsSelectable(true);
+                    if (!item.imageOffsets.isEmpty()) {
+                        SpannableString body=new SpannableString(value);
+                        for (int i=0;i<item.imageOffsets.size();i++) {
+                            int at=item.imageOffsets.get(i), index=i;
+                            String mark=Attachment.marker(i+1);
+                            if (value.startsWith(mark,at)) body.setSpan(new ClickableSpan() {
+                                @Override public void onClick(View v) { PhotoViewer.open(MainActivity.this,item.imagePaths(),index); }
+                            },at,at+mark.length(),Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                        }
+                        text.setText(body); text.setMovementMethod(LinkMovementMethod.getInstance());
+                    }
                     ScrollView view=new ScrollView(this); view.addView(text);
                     new AlertDialog.Builder(this).setTitle(item.name).setView(view).setPositiveButton("关闭",null).show();
                 });
@@ -433,7 +446,7 @@ public final class MainActivity extends Activity {
     }
     private void gallery() {
         if (app.imports.busy(chatId)) return;
-        int slots=Attachment.MAX_IMAGES-Attachment.images(draftFiles);
+        int slots=Attachment.MAX_PHOTOS-Attachment.photos(draftFiles);
         if (slots<=0) { toast("最多 9 张图片"); return; }
         photoChat=chatId;
         if (Build.VERSION.SDK_INT>=33) {
@@ -455,7 +468,7 @@ public final class MainActivity extends Activity {
     }
     private void camera() {
         if (app.imports.busy(chatId)) return;
-        if (Attachment.images(draftFiles)>=Attachment.MAX_IMAGES) { toast("最多 9 张图片"); return; }
+        if (Attachment.photos(draftFiles)>=Attachment.MAX_PHOTOS) { toast("最多 9 张图片"); return; }
         photoChat=chatId;
         try {
             File dir=new File(getCacheDir(),"camera"); dir.mkdirs(); File f=File.createTempFile("photo-",".jpg",dir); cameraPath=f.getPath();
@@ -489,7 +502,7 @@ public final class MainActivity extends Activity {
         if (camera!=null) sources.add(Uri.fromFile(camera));
         else if (data!=null && data.getClipData()!=null) {
             ClipData clip=data.getClipData();
-            int cap=req==DOCUMENT ? Attachment.MAX_DOCUMENTS : Attachment.MAX_IMAGES;
+            int cap=req==DOCUMENT ? Attachment.MAX_DOCUMENTS : Attachment.MAX_PHOTOS;
             for (int i=0;i<Math.min(clip.getItemCount(),cap+1);i++) {
                 Uri picked=clip.getItemAt(i).getUri();
                 if (picked!=null) sources.add(picked);

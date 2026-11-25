@@ -2,7 +2,17 @@
 
 ## v0.1.5-test
 
-- ARM64 签名包大小为 **134,285,326 字节（128.06 MiB）**，SHA-256 为 `83953c98e9b28c22c7a00112d093aa8d6fd8df9a6bd000a48ec9652d148fede0`。包名为 `com.sunwin.deepseekharness`，versionCode 6，versionName 0.1.5，minSdk 29，targetSdk 34。APK v2 签名和 ZIP 对齐检查通过。本次逐一核对了 0.1.0 至 0.1.4 的五个公开 APK，证书 SHA-256 均为 `b849e51b4f5a8691ffca6eecbae2592fc28afe06acccc148c52b67f2abc2079e`。[下载 APK](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/download/v0.1.5-test/deepseek-harness-test.apk)
+### 内嵌图片更新
+
+- 最终签名包为 **134,301,846 字节（128.08 MiB）**，SHA-256 为 `5ccab76e9e43f24c6f14038ed856d3633f6fc7c121a537abb1a7bbc51efd4a6b`。包名 `com.sunwin.deepseekharness`，versionCode 6，versionName 0.1.5。通过 APK v2 签名及 ZIP 对齐校验，与 0.1.0 至 0.1.4 的五个公开 APK 及 0.1.5 首发包逐一核对签名，六份旧包的证书 SHA-256 均为 `b849e51b4f5a8691ffca6eecbae2592fc28afe06acccc148c52b67f2abc2079e`。[下载 APK](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/download/v0.1.5-test/deepseek-harness-test.apk)
+- 宿主机分别用官方 x86_64 和 ARM64 DSH 0.2.2-rc.2 运行发布版测试，两组各通过 39 项，跳过 0 项。本地推理端在同一条消息中收到了 9 张手选照片和 11 张文档图片，逐项核对图号、图块顺序和后文。下一轮收到 20 处旧图卸载标识和原文中的图号。摘要请求仍含图号和旧文件正文。两种大小的模型窗口均验证了图片名额随上下文余量减少。[协议回放](../app/src/test/java/com/sunwin/deepseekharness/HarnessReplayTest.java)
+- DOCX、PPTX、XLSX 和 PDF 夹具核对了前文、图号、JPEG 像素和后文。覆盖空行与空列、嵌套 PDF 表单和行内图、软蒙版、纯扫描件、短边 63 和 64 像素的边界、较大及高噪声图片、每文件 10 张上限、原文自带的同名标记、字节截断和超额图片。关闭并重开 SQLite 后再次核对发包内容，删除对话后独占图片被清理，共享图片保留至最后一个引用消失。[附件测试](../app/src/test/java/com/sunwin/deepseekharness/AttachmentTest.java)
+- 在全新的 Android 10 ARM64 模拟器上先安装 0.1.5 首发包，在 SQLite v5 中保存一条照片消息，再用同 versionCode 的最终签名包覆盖安装。设备内 APK 的 SHA-256 与发布物一致。ADB 回环连接隔离的官方 ARM64 DSH，接收端核对了同一轮的 3 张手选照片、2 张内嵌图及 TXT、DOCX 正文。实测点正文中的第二个图号打开对应图片、全屏滑动和双指缩放。强制停止后再打开，新消息的缩略图、正文和升级前的照片均可查看。[模拟器界面测试](../app/src/androidTest/java/com/sunwin/deepseekharness/DeviceAttachments.java)
+- 同一签名客户端独立运行了三种 Office 夹具、文字 PDF、混排 PDF、软蒙版和扫描 PDF 的设备测试。首次格式测试与应用启动时的临时文件清理并发。测试改为等待初始化完成后，所有夹具通过。本次模型流量全部由回环夹具响应，真实模型调用 0 次。[附件格式与限额](ATTACHMENTS.md)
+
+### 首次发布
+
+- ARM64 签名包大小为 **134,285,326 字节（128.06 MiB）**，SHA-256 为 `83953c98e9b28c22c7a00112d093aa8d6fd8df9a6bd000a48ec9652d148fede0`。包名为 `com.sunwin.deepseekharness`，versionCode 6，versionName 0.1.5，minSdk 29，targetSdk 34。APK v2 签名和 ZIP 对齐检查通过。首次发布时逐一核对了 0.1.0 至 0.1.4 的五个公开 APK，证书 SHA-256 均为 `b849e51b4f5a8691ffca6eecbae2592fc28afe06acccc148c52b67f2abc2079e`。
 - 宿主机分别运行官方 x86_64 与 ARM64 DSH 0.2.2-rc.2，两组各通过 29 项测试，跳过 0 项。本地推理端验证了同一次模型请求中的 9 个有序图片引用，下一轮验证 9 个旧图占位符。旧文件正文进入原生压缩摘要，首轮前缀和最近四轮通过原有回归检查。另测了不同模型下的文件字节预算和剩余空间边界。[官方运行时回放](../app/src/test/java/com/sunwin/deepseekharness/HarnessReplayTest.java)
 - SQLite v4 的单图行迁入 v5，关闭并重开后从原路径解码出像素。测试也核对了草稿、共享文件、独占扫描页、删除回滚、UTF-8 截断和本机较长的预览。文本、Markdown、CSV、JSON、代码、三种 Office 文档和 PDF 均有生成或合成样例。主机的扫描页测试用 PDFBox 绘制夹具，Android 测试调用系统 PdfRenderer。[附件回归测试](../app/src/test/java/com/sunwin/deepseekharness/AttachmentTest.java)
 - 在独立的空白 Android 10 ARM64 模拟器 `upgrade015` 上先安装公开的 0.1.4。测试程序用 `attachment-seed-v4` 在 v4 数据库写入单图消息，再用 `adb install -r` 覆盖安装最终签名包。`attachment-upgrade` 打开旧对话并核对缩略图。设备内 APK 的 SHA-256 与下载文件一致。

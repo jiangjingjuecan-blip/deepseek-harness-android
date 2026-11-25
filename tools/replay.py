@@ -76,7 +76,7 @@ class Server(BaseHTTPRequestHandler):
                 file_id = 'file-pixel'
             elif len(image) == len(PHOTO)+5 and image[:6] == bytes.fromhex('ffd8fffe0003') and image[7:] == PHOTO[2:]:
                 file_id = 'file-pixel-'+str(image[6])
-            elif self.server.device_attachments and image.startswith(bytes.fromhex('ffd8')) and 0 < len(image) < 65536:
+            elif image.startswith(bytes.fromhex('ffd8')) and 0 < len(image) < 65536:
                 file_id = 'file-'+hashlib.sha256(image).hexdigest()[:16]
             else:
                 self.send_error(400)
@@ -95,9 +95,9 @@ class Server(BaseHTTPRequestHandler):
         if self.server.device_attachments and '附件回放' in last:
             blocks=msgs[-1]['content']
             images=[b.get('source',{}).get('file_id') for b in blocks if b.get('type')=='image']
-            if (len(images)!=3 or len(set(images))!=3 or not all(images) or
+            if (len(images)!=5 or len(set(images))!=5 or not all(images) or
                     '[文件：便签.txt]' not in last or '设备文件正文' not in last or
-                    '[文件：报告.docx]' not in last or '设备段落' not in last):
+                    '[文件：报告.docx]' not in last or '|[图 1]' not in last or '|[图 2]' not in last):
                 self.send_error(400)
                 return
             self.server.seen.add('device-attachments')
@@ -119,7 +119,7 @@ class Server(BaseHTTPRequestHandler):
             if obj.get('max_tokens') != 2048 or old_a == old_b or '近三' in contents:
                 self.send_error(400)
                 return
-            if old_a and 'file-turn' in self.server.seen and '旧文件正文' not in contents:
+            if old_a and 'file-turn' in self.server.seen and ('旧文件正文' not in contents or '[图 2]' not in contents or '"type": "image"' in contents):
                 self.send_error(400)
                 return
             if old_b and '摘要甲' not in contents:
@@ -145,7 +145,7 @@ class Server(BaseHTTPRequestHandler):
                     return
             answers={'固定首问':'首答', '旧甲':'旧图是紫色', '旧乙':'乙答', '近三':'三答',
                      '近四':'四答', '近五':'五答', '抬高用量':'六答', '核对自动':'七答'}
-            if '旧甲' in last and '[文件：归档.md]' in last and '旧文件正文' in last:
+            if '旧甲' in last and '[文件：归档.docx]' in last and '旧文件正文' in last and '[图 2]' in last:
                 self.server.seen.add('file-turn')
             if '抬高用量' in last or '核对自动' in last:
                 auto = '核对自动' in last
@@ -180,17 +180,33 @@ class Server(BaseHTTPRequestHandler):
             self.send_error(400)
             return
         if second:
-            if (first or contents.count('image omitted')!=9 or '"type": "image"' in contents or
+            if (first or contents.count('image omitted')!=20 or '[图 10]' not in contents or '中段|[图 2]' in contents or '"type": "image"' in contents or
                     not any(m['role']=='assistant' and '紫色' in json.dumps(m,ensure_ascii=False) for m in msgs)):
                 self.send_error(400)
                 return
             self.server.seen.add('multi')
         else:
             images=[b.get('source',{}).get('file_id') for b in msgs[-1]['content'] if b.get('type')=='image']
-            if images!=['file-pixel']+['file-pixel-'+str(i) for i in range(1,9)]:
+            if (len(images)!=20 or images[:9]!=['file-pixel']+['file-pixel-'+str(i) for i in range(1,9)]
+                    or images[9]==images[10] or images[9:]!=images[9:11]*5+[images[9]]):
                 self.send_error(400)
                 return
-            self.server.seen.add('nine-images')
+            # The actual provider envelope must keep each marker and its image together.
+            pending=''
+            index=0
+            for block in msgs[-1]['content']:
+                if block.get('type')=='text':
+                    pending+=block['text']
+                elif block.get('type')=='image':
+                    if index>=9 and ('[图 '+str((index-9)%10+1)+']') not in pending:
+                        self.send_error(400)
+                        return
+                    index+=1
+                    pending=''
+            if '段尾' not in pending or '[图 2]' in pending:
+                self.send_error(400)
+                return
+            self.server.seen.add('twenty-images')
             self.server.seen.add('image-turn')
         self.stream('第二轮' if second else '紫', split=not second)
 
@@ -286,7 +302,7 @@ def run(abi, root, serial=None, scenario='context'):
                     if line.strip()=='done':
                         return (server.summaries == ['a','b'] and
                                 server.seen=={'early','multi','image-turn','photo','quota','future-cap','restored-cap',
-                                              'summary-a','summary-b','manual-tail','auto-tail','nine-images','file-turn'})
+                                              'summary-a','summary-b','manual-tail','auto-tail','twenty-images','file-turn'})
             finally:
                 if proc.poll() is None:
                     os.killpg(proc.pid,signal.SIGTERM)

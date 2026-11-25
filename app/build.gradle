@@ -53,7 +53,7 @@ tasks.register('prepareRuntime', Exec) {
 }
 tasks.named('preBuild').configure { dependsOn 'prepareRuntime' }
 dependencies {
-    // Only plain PDF text is extracted. Signing and public-key encryption are unused.
+    // Local PDF text and image extraction needs no signing or public-key encryption provider.
     implementation('com.tom-roush:pdfbox-android:2.0.27.0') { exclude group: 'org.bouncycastle' }
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
     implementation 'androidx.core:core:1.13.1'

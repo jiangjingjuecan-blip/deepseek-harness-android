@@ -68,7 +68,7 @@ final class ChatEngine {
         Loopback api=app.api;
         String model=app.account.selected;
         if (busy() || app.imports.busy(chatId) || api==null || !app.account.stored || model.isEmpty() || (text.isEmpty() && files.isEmpty())
-                || Attachment.images(files)>Attachment.MAX_IMAGES || Attachment.documents(files)>Attachment.MAX_DOCUMENTS) return false;
+                || Attachment.photos(files)>Attachment.MAX_PHOTOS || Attachment.documents(files)>Attachment.MAX_DOCUMENTS) return false;
         List<Attachment> attachments=new ArrayList<>(files);
         long row;
         try { row=app.history.begin(chatId,text,attachments); }
@@ -133,11 +133,11 @@ final class ChatEngine {
             stage=CONTEXT;
             if (active!=work) return;
             prepared=ContextUsage.prepare(api,session,ContextUsage.argument(draft,files));
-            draft+=prepared.fileBytes;
+            draft+=prepared.fileBytes+(long)prepared.documentImages*ContextUsage.DOCUMENT_IMAGE_COST;
             meter(work,prepared);
             app.changed();
             stage=READ_ATTACHMENT;
-            JSONObject prompt=Wire.prompt(app,session,requestId,text,files,prepared.fileBytes);
+            JSONObject prompt=Wire.prompt(app,session,requestId,text,files,prepared.fileBytes,prepared.documentImages);
             Feed feed=new Feed(Wire.follow(session).toString());
             stage=FOLLOW;
             socket=follow(work,api,feed);

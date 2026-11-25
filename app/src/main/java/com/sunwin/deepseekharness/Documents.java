@@ -8,9 +8,6 @@ import android.net.Uri;
 import android.os.ParcelFileDescriptor;
 import android.provider.OpenableColumns;
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader;
-import com.tom_roush.pdfbox.io.MemoryUsageSetting;
-import com.tom_roush.pdfbox.pdmodel.PDDocument;
-import com.tom_roush.pdfbox.text.PDFTextStripper;
 import java.io.*;
 import java.nio.charset.*;
 import java.nio.file.Files;
@@ -32,6 +29,18 @@ final class Documents {
     static final class Full extends IOException {}
     static final class Text extends Writer {
         final StringBuilder buffer=new StringBuilder();
+        final List<String> images=new ArrayList<>();
+        final List<Integer> offsets=new ArrayList<>();
+        boolean canTakeImage() {
+            return images.size()<Attachment.MAX_EMBEDDED_IMAGES &&
+                    buffer.length()+Attachment.marker(images.size()+1).length()<=MAX_CHARS;
+        }
+        void image(String path) {
+            if (path==null) return;
+            offsets.add(buffer.length());
+            images.add(path);
+            buffer.append(Attachment.marker(images.size()));
+        }
         boolean more;
         @Override public void write(char[] chars,int start,int count) throws IOException {
             int n=Math.min(count,MAX_CHARS-buffer.length());
@@ -73,6 +82,8 @@ final class Documents {
         File dir=scratch(ctx);
         if (!dir.mkdirs() && !dir.isDirectory()) throw new IOException("document-dir");
         File tmp=File.createTempFile("source-",".part",dir);
+        Text out=new Text();
+        boolean saved=false;
         try {
             try (InputStream in=ctx.getContentResolver().openInputStream(uri); OutputStream output=new FileOutputStream(tmp)) {
                 if (in==null) throw new IOException("open");
@@ -83,14 +94,15 @@ final class Documents {
                     output.write(bytes,0,n);
                 }
             }
-            Text out=new Text();
+
             try {
                 if (plain) readPlain(tmp,out);
-                else if ("pdf".equals(ext)) readPdf(ctx,tmp,out);
-                else OfficeText.read(tmp,ext,out);
+                else if ("pdf".equals(ext)) {
+                    PDFBoxResourceLoader.init(ctx.getApplicationContext());
+                    if (!PdfText.read(ctx,tmp,out)) return scan(ctx,tmp,name,imageSlots);
+                } else OfficeText.read(ctx,tmp,ext,out);
             } catch (Full enough) { out.more=true; }
             if (out.buffer.toString().trim().isEmpty()) {
-                if ("pdf".equals(ext)) return scan(ctx,tmp,name,imageSlots);
                 throw new IOException("empty");
             }
             byte[] bytes=out.value().getBytes(StandardCharsets.UTF_8);
@@ -98,8 +110,15 @@ final class Documents {
             File copy=Attachment.file(ctx,path);
             try { Files.write(copy.toPath(),bytes); }
             catch (IOException e) { copy.delete(); throw e; }
-            return new Attachment(Attachment.Kind.TEXT,name,bytes.length,Collections.singletonList(path));
-        } finally { tmp.delete(); }
+            List<String> paths=new ArrayList<>();
+            paths.add(path); paths.addAll(out.images);
+            Attachment item=new Attachment(Attachment.Kind.TEXT,name,bytes.length,paths,out.offsets);
+            saved=true;
+            return item;
+        } finally {
+            if (!saved) for (String image:out.images) Attachment.file(ctx,image).delete();
+            tmp.delete();
+        }
     }
     private static void readPlain(File file,Text out) throws IOException {
         try (BufferedInputStream input=new BufferedInputStream(new FileInputStream(file))) {
@@ -121,35 +140,6 @@ final class Documents {
             }
         }
     }
-    private static void readPdf(Context ctx,File file,Text out) throws IOException {
-        PDFBoxResourceLoader.init(ctx.getApplicationContext());
-        MemoryUsageSetting memory=MemoryUsageSetting.setupMixed(4L*1024*1024,64L*1024*1024).setTempDir(scratch(ctx));
-        try (PDDocument pdf=PDDocument.load(file,memory)) {
-            if (pdf.isEncrypted() || !pdf.getCurrentAccessPermission().canExtractContent()) throw new IOException("protected");
-            PDFTextStripper text=new PDFTextStripper() {
-                private int positions;
-                @Override protected void startPage(com.tom_roush.pdfbox.pdmodel.PDPage page) throws IOException {
-                    positions=0; super.startPage(page);
-                }
-                @Override protected void processTextPosition(com.tom_roush.pdfbox.text.TextPosition position) {
-                    // TextStripper retains glyph positions until a page ends.
-                    if (positions++<16384) super.processTextPosition(position);
-                    else out.more=true;
-                }
-                @Override protected void endPage(com.tom_roush.pdfbox.pdmodel.PDPage page) throws IOException {
-                    super.endPage(page);
-                    if (positions>16384) throw new Full();
-                }
-            };
-            text.setShouldSeparateByBeads(false);
-            text.setEndPage(PDF_PAGES);
-            text.writeText(pdf,out);
-            if (pdf.getNumberOfPages()>PDF_PAGES) out.more=true;
-        } catch (NoClassDefFoundError e) {
-            // Public-key encrypted PDFs can request PDFBox's optional cryptography provider.
-            throw new IOException("unsupported-pdf",e);
-        }
-    }
     private static Attachment scan(Context ctx,File file,String name,int slots) throws IOException {
         if (slots<=0) throw new ImageLimit();
         List<String> paths=new ArrayList<>();
@@ -162,10 +152,8 @@ final class Documents {
                     int w=page.getWidth(), h=page.getHeight();
                     if (w<=0 || h<=0) throw new IOException("page-size");
                     float scale=(float)Photos.LONG_EDGE/Math.max(w,h);
-                    Bitmap bitmap=Bitmap.createBitmap(Math.max(1,Math.round(w*scale)),Math.max(1,Math.round(h*scale)),Bitmap.Config.ARGB_8888);
+                    Bitmap bitmap=renderPage(page,Math.max(1,Math.round(w*scale)),Math.max(1,Math.round(h*scale)));
                     try {
-                        bitmap.eraseColor(Color.WHITE);
-                        page.render(bitmap,null,null,PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
                         paths.add(Photos.saveJpeg(ctx,bitmap));
                     } finally { bitmap.recycle(); }
                 }
@@ -175,5 +163,13 @@ final class Documents {
             throw e;
         }
         return new Attachment(Attachment.Kind.SCAN,name,0,paths);
+    }
+    static Bitmap renderPage(PdfRenderer.Page page,int w,int h) {
+        Bitmap bitmap=Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888);
+        try {
+            bitmap.eraseColor(Color.WHITE);
+            page.render(bitmap,null,null,PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
+            return bitmap;
+        } catch (RuntimeException e) { bitmap.recycle(); throw e; }
     }
 }

@@ -22,6 +22,7 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk=33, manifest=Config.NONE, application=HarnessApp.class)
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
 public class HarnessReplayTest {
     @Rule public TemporaryFolder folder=new TemporaryFolder();
 
@@ -61,6 +62,8 @@ public class HarnessReplayTest {
                 Files.write(app.getFilesDir().toPath().resolve(path),jpeg.toByteArray());
                 batch.add(Attachment.photo(path));
             }
+            for (String name:new String[]{"many-pictures.docx","pictures.docx"})
+                batch.add(Documents.importFile(app,android.net.Uri.fromFile(Paths.get("src/test/resources",name).toFile()),3));
             String[] prompts={"看图","继续","额度回放","额度回放看图"};
             for (int turn=0;turn<prompts.length;turn++) {
                 List<Attachment> image=turn==0 ? batch : turn==3 ? Collections.singletonList(Attachment.photo(photo)) : Collections.emptyList();
@@ -140,8 +143,8 @@ public class HarnessReplayTest {
         long id=app.history.create();
         String[] prompts={"固定首问","旧甲"+String.join("",java.util.Collections.nCopies(600,"甲")),
                 "旧乙"+String.join("",java.util.Collections.nCopies(600,"乙")),"近三","近四","近五","抬高用量","核对自动"};
-        Path source=folder.getRoot().toPath().resolve("归档.md");
-        Files.write(source,"旧文件正文".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        Path source=folder.getRoot().toPath().resolve("归档.docx");
+        Files.copy(Paths.get("src/test/resources/pictures.docx"),source);
         Attachment doc=Documents.importFile(app,android.net.Uri.fromFile(source.toFile()),9);
         for (int turn=0;turn<prompts.length;turn++) {
             if (turn==6) {
@@ -164,6 +167,10 @@ public class HarnessReplayTest {
                     long remaining=threshold-usage.used;
                     ContextUsage files=ContextUsage.prepare(api,session,"files 80 65536 4");
                     assertEquals(Math.min(65536,threshold/4),files.fileBytes);
+                    ContextUsage two=ContextUsage.prepare(api,session,"files "+(remaining-2*ContextUsage.DOCUMENT_IMAGE_COST-17)+" 65536 4 20");
+                    assertEquals(2,two.documentImages); assertEquals(16,two.fileBytes);
+                    ContextUsage zero=ContextUsage.prepare(api,session,"files "+(remaining-17)+" 65536 4 20");
+                    assertEquals(0,zero.documentImages); assertEquals(16,zero.fileBytes);
                     assertEquals(16,ContextUsage.prepare(api,session,"files "+(remaining-17)+" 65536 4").fileBytes);
                     assertThrows(ChatFailure.class,()->ContextUsage.prepare(api,session,"files "+(remaining-16)+" 65536 4"));
                     assertFalse(ContextUsage.prepare(api,session,String.valueOf(remaining-1)).compacted);
@@ -179,7 +186,10 @@ public class HarnessReplayTest {
         assertEquals(photo,app.history.messages(id).get(2).attachments.get(0).paths.get(0));
         assertArrayEquals(Files.readAllBytes(Paths.get("src/test/resources/photo.jpg")),
                 Files.readAllBytes(new File(app.getFilesDir(),photo).toPath()));
-        assertEquals("旧文件正文",new String(Files.readAllBytes(Attachment.file(app,doc.paths.get(0)).toPath()),"UTF-8"));
+        assertEquals("旧文件正文[图 1]原文|[图 1]|中段|[图 2]|段尾\n",
+                new String(Files.readAllBytes(Attachment.file(app,doc.paths.get(0)).toPath()),"UTF-8"));
+        assertEquals(2,doc.imageCount());
+        for (String picture:doc.imagePaths()) assertTrue(Attachment.file(app,picture).length()>0);
         long routes=app.history.create();
         for (String model:new String[]{"fixture-future","deepseek-v4-pro"}) {
             app.account.selected=model;
