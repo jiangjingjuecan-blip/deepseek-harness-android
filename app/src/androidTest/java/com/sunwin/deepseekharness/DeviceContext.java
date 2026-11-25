@@ -22,7 +22,7 @@ final class DeviceContext {
         this.test=test; this.activity=activity; app=(HarnessApp)activity.getApplication();
     }
 
-    void run(int port,String mode) throws Exception {
+    void run(int port,String mode,android.os.Bundle result) throws Exception {
         if (port<1 || port>65535) throw new AssertionError();
         activity.stopService(new Intent(activity,HarnessService.class));
         await("stop-emulator-service",()->"stopped".equals(app.serviceState) || "failed".equals(app.serviceState));
@@ -43,6 +43,16 @@ final class DeviceContext {
             onUi(()->{
                 click("历史对话"); click("新建对话");
             });
+            if ("send-ui".equals(mode)) {
+                DeviceSendUi ui=new DeviceSendUi(test,activity,port);
+                try { ui.run(); } finally { stage=ui.stage; if (ui.revealRate!=null) result.putString("reveal_rate",ui.revealRate); }
+                return;
+            }
+            if ("send-bench".equals(mode)) {
+                DeviceSendBench bench=new DeviceSendBench(test,activity);
+                try { bench.run(result); } finally { stage=bench.stage; }
+                return;
+            }
             if ("adventure-ui".equals(mode)) {
                 DeviceAdventure adventure=new DeviceAdventure(test,activity);
                 try { adventure.run(); } finally { stage=adventure.stage; }

@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +39,10 @@ class Server(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(obj).encode())
 
     def do_GET(self):
+        if self.server.send_ui and self.path == '/fixture-next':
+            self.server.advance.set()
+            self.json({})
+            return
         if self.path == '/fixture-connect':
             connection = self.server.__dict__.pop('handoff', None)
             if connection is None:
@@ -107,6 +112,24 @@ class Server(BaseHTTPRequestHandler):
         if self.is_title(obj):
             self.stream('回放')
             return
+        if self.server.send_feel:
+            question = next((b.get('text', '') for b in msgs[-1]['content']
+                             if b.get('text', '').startswith('采样')), '')
+            if question:
+                self.server.seen.add(question)
+                if self.server.send_ui:
+                    self.server.advance.clear()
+                try:
+                    if question == '采样八字':
+                        # 24 characters at once stay below the catch-up thresholds, so the
+                        # client reveals them at its default 8 per second while the turn is held open.
+                        self.stream('溪水八' + '春江潮水连海平' * 3, hold=True)
+                    else:
+                        self.stream('溪水' + question[-1], paced=True)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # A stop closes the fixture's HTTP stream.
+
+                return
         if self.server.device_adventure:
             texts=[''.join(b.get('text','') for b in m['content'] if not b.get('text','').startswith('<system-reminder>')) for m in msgs]
             roll=self.server.device_roll
@@ -279,7 +302,7 @@ class Server(BaseHTTPRequestHandler):
     def is_title(obj):
         return 'title' in str(obj.get('system','')).lower()
 
-    def stream(self, answer, input_tokens=2, split=False):
+    def stream(self, answer, input_tokens=2, split=False, paced=False, hold=False):
         self.send_response(200)
         self.send_header('Content-Type','text/event-stream')
         self.end_headers()
@@ -292,6 +315,15 @@ class Server(BaseHTTPRequestHandler):
         event('message_start', message={'id':'replay','model':'deepseek-flash','usage':{'input_tokens':input_tokens}})
         event('content_block_start', index=0, content_block={'type':'text','text':''})
         event('content_block_delta', index=0, delta={'type':'text_delta','text':answer})
+        if hold:
+            self.server.advance.wait(35)
+        if paced:
+            if self.server.send_ui:
+                event('content_block_delta', index=0, delta={'type':'text_delta','text':'白云' * 32})
+                self.server.advance.wait(35)
+            for _ in range(64):
+                time.sleep(.04)
+                event('content_block_delta', index=0, delta={'type':'text_delta','text':'过石桥'})
         if split and self.server.advance.wait(12):
             self.server.seen.add('early')
         if split:
@@ -318,6 +350,8 @@ def run(abi, root, serial=None, scenario='context'):
     home = root/'dsh'
     home.mkdir(exist_ok=True)
     with ThreadingHTTPServer(('127.0.0.1',0),Server) as server:
+        server.send_ui=scenario=='send-ui'
+        server.send_feel=scenario in ('send-bench', 'send-ui')
         server.device_adventure=scenario=='adventure-ui'
         server.device_roll=None
         server.adventure=scenario=='adventure'
@@ -401,6 +435,10 @@ def device(serial, server, root, runtime_port, bootstrap, scenario):
                               stdout=subprocess.PIPE,text=True,check=True)
         print(result.stdout, end='')
         print('Provider observations:',', '.join(sorted(server.seen)))
+        if scenario=='send-ui':
+            return 'passed=send-ui' in result.stdout and {'采样重试','采样停止','采样八字','采样即时'} <= server.seen
+        if scenario=='send-bench':
+            return 'passed=send-bench' in result.stdout and len(server.seen)==5
         if scenario=='adventure-ui':
             return 'passed=adventure-ui' in result.stdout and server.seen=={'entrance','silver','regen','edited-assistant','edited-user','fork'}
         if scenario=='attachments':
@@ -414,9 +452,9 @@ def device(serial, server, root, runtime_port, bootstrap, scenario):
 
 if __name__=='__main__':
     os.umask(0o077)
-    if len(sys.argv)==3 and sys.argv[1] in ('--device','--device-attachments','--device-adventure'):
+    if len(sys.argv)==3 and sys.argv[1] in ('--device','--device-attachments','--device-adventure','--device-send-bench','--device-send-ui'):
         with tempfile.TemporaryDirectory(prefix='phone-context-') as root:
-            raise SystemExit(0 if run('arm64-v8a',Path(root),sys.argv[2], {'--device':'context','--device-attachments':'attachments','--device-adventure':'adventure-ui'}[sys.argv[1]]) else 1)
+            raise SystemExit(0 if run('arm64-v8a',Path(root),sys.argv[2], {'--device':'context','--device-attachments':'attachments','--device-adventure':'adventure-ui','--device-send-bench':'send-bench','--device-send-ui':'send-ui'}[sys.argv[1]]) else 1)
     if not all(stat.S_ISFIFO(os.fstat(fd).st_mode) for fd in (0,1)) or (len(sys.argv)!=3 and sys.argv[3:]!=['adventure']):
         raise SystemExit('Run the Gradle replay test.')
     raise SystemExit(0 if run(sys.argv[1],Path(sys.argv[2]),scenario=sys.argv[3] if len(sys.argv)==4 else 'context') else 1)

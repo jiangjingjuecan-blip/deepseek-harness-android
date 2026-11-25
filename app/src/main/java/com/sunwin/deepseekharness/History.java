@@ -24,15 +24,21 @@ final class History extends SQLiteOpenHelper {
         final String session;
         final int version, versions, fileBytes, imageSlots;
         final boolean saved;
+        final int missing; final boolean documents;
+        Message(long id,String role,String text,List<Attachment> attachments) {
+            this.id=id; this.role=role; this.text=text; this.attachments=attachments;
+            state="assistant".equals(role)?"pending":"done"; error=session=null;
+            family=id; seq=fileBytes=imageSlots=-1; version=versions=1; saved=false; missing=0; documents=false;
+        }
         Message(Cursor c,List<Attachment> attachments) {
             id=c.getLong(0); role=c.getString(1); text=c.getString(2); state=c.getString(3); error=c.getString(4);
             family=c.getLong(5); version=c.getInt(6); versions=c.getInt(7); saved=c.getInt(8)!=0;
             session=c.getString(9); seq=c.getLong(10); fileBytes=c.getInt(11); imageSlots=c.getInt(12);
-            this.attachments=attachments;
+            this.attachments=attachments; missing=c.getInt(19); documents=c.getInt(20)!=0;
         }
     }
     private final File filesDir;
-    History(Context context) { super(context, "chats.db", null, 7); filesDir=context.getFilesDir(); }
+    History(Context context) { super(context, "chats.db", null, 8); filesDir=context.getFilesDir(); }
     @Override public void onConfigure(SQLiteDatabase db) { db.setForeignKeyConstraintsEnabled(true); }
     @Override public void onCreate(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE chat(id INTEGER PRIMARY KEY, title TEXT NOT NULL, remote TEXT UNIQUE, updated INTEGER NOT NULL)");
@@ -42,6 +48,11 @@ final class History extends SQLiteOpenHelper {
         createPhotoCleanup(db);
         createAttachments(db);
         createBranches(db);
+        createImports(db);
+    }
+    private static void createImports(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE message_import(message INTEGER NOT NULL REFERENCES message(id) ON DELETE CASCADE,"+
+                "position INTEGER NOT NULL,uri TEXT NOT NULL,document INTEGER NOT NULL,PRIMARY KEY(message,position),UNIQUE(message,uri))");
     }
     private static void createMeter(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE context_meter(chat INTEGER PRIMARY KEY REFERENCES chat(id) ON DELETE CASCADE, model TEXT NOT NULL, used INTEGER NOT NULL, capacity INTEGER NOT NULL)");
@@ -100,6 +111,7 @@ final class History extends SQLiteOpenHelper {
             db.execSQL("UPDATE message SET photo=NULL WHERE photo IS NOT NULL");
         } else if (oldVersion==5) db.execSQL("ALTER TABLE attachment_file ADD COLUMN text_offset INTEGER");
         if (oldVersion<7) createBranches(db);
+        if (oldVersion<8) createImports(db);
     }
     void meter(long id,String model,ContextUsage usage) {
         meterBranch(chat(id).branch,model,usage);
@@ -144,7 +156,14 @@ final class History extends SQLiteOpenHelper {
             db.setTransactionSuccessful(); return chat;
         } finally { db.endTransaction(); }
     }
-    private static final String CHATS="SELECT c.id,c.title,b.remote,b.id,b.dirty,b.number FROM chat c JOIN branch b ON b.chat=c.id AND b.selected=1 ";
+    private static final String CHAT_BRANCH="SELECT c.id,c.title,b.remote,b.id,b.dirty,b.number FROM chat c JOIN branch b ON b.chat=c.id ";
+    private static final String CHATS=CHAT_BRANCH+"AND b.selected=1 ";
+    Chat branchChat(long branch) {
+        try (Cursor c=getReadableDatabase().rawQuery(CHAT_BRANCH+"WHERE b.id=?",args(branch))) {
+            if (!c.moveToFirst()) throw new SQLiteException("missing-branch");
+            return new Chat(c);
+        }
+    }
     List<Chat> list() {
         List<Chat> items = new ArrayList<>();
         try (Cursor c=getReadableDatabase().rawQuery(CHATS+"ORDER BY c.updated DESC,c.id DESC",null)) {
@@ -316,7 +335,8 @@ final class History extends SQLiteOpenHelper {
         try (Cursor c=getReadableDatabase().rawQuery("SELECT m.id,m.role,m.body,m.state,m.error,m.family,"+
                 "(SELECT COUNT(*) FROM message v WHERE v.family=m.family AND v.id<=m.id),"+
                 "(SELECT COUNT(*) FROM message v WHERE v.family=m.family),s.message IS NOT NULL,m.anchor_remote,COALESCE(m.anchor_seq,-1),"+
-                "COALESCE(m.file_bytes,-1),COALESCE(m.image_slots,-1),a.id,a.kind,a.name,a.bytes,f.path,f.text_offset "+
+                "COALESCE(m.file_bytes,-1),COALESCE(m.image_slots,-1),a.id,a.kind,a.name,a.bytes,f.path,f.text_offset,"+
+                "(SELECT COUNT(*) FROM message_import i WHERE i.message=m.id),(SELECT MAX(document) FROM message_import i WHERE i.message=m.id) "+
                 "FROM branch_message b JOIN message m ON m.id=b.message LEFT JOIN save_point s ON s.branch=b.branch AND s.message=m.id "+
                 "LEFT JOIN attachment a ON a.message=m.id LEFT JOIN attachment_file f ON f.attachment=a.id "+
                 "WHERE b.branch=? AND b.message BETWEEN ? AND ? ORDER BY b.message,a.id,f.position",args(branch,from,through))) {
@@ -339,7 +359,7 @@ final class History extends SQLiteOpenHelper {
         for (int i=0;i<ids.length;i++) result[i]=Long.toString(ids[i]);
         return result;
     }
-    private void insertAttachment(SQLiteDatabase db,long chat,long branch,Long message,Attachment item) {
+    private long insertAttachment(SQLiteDatabase db,long chat,long branch,Long message,Attachment item) {
         ContentValues v=new ContentValues();
         v.put("chat",chat); v.put("message",message); if (message==null) v.put("draft_branch",branch); v.put("kind",item.kind.name());
         v.put("name",item.name); v.put("bytes",item.textBytes);
@@ -347,20 +367,56 @@ final class History extends SQLiteOpenHelper {
         for (int i=0;i<item.paths.size();i++)
             db.execSQL("INSERT INTO attachment_file(attachment,position,path,text_offset) VALUES(?,?,?,?)",
                     new Object[]{id,i,item.paths.get(i),item.kind==Attachment.Kind.TEXT && i>0 ? item.imageOffsets.get(i-1) : null});
+        return id;
     }
     boolean addDraft(long chat,Attachment item) {
         Chat current=chat(chat);
         return current!=null && addDraft(chat,current.branch,item);
     }
     boolean addDraft(long chat,long branch,Attachment item) {
+        return addDraftFile(chat,branch,item)!=0;
+    }
+    long addDraftFile(long chat,long branch,Attachment item) {
         SQLiteDatabase db=getWritableDatabase(); db.beginTransaction();
         try {
-            if (android.database.DatabaseUtils.longForQuery(db,"SELECT COUNT(*) FROM branch WHERE id=? AND chat=?",args(branch,chat))==0) return false;
+            if (android.database.DatabaseUtils.longForQuery(db,"SELECT COUNT(*) FROM branch WHERE id=? AND chat=?",args(branch,chat))==0) return 0;
             List<Attachment> existing=branchDraft(branch);
             if ((item.kind==Attachment.Kind.PHOTO && Attachment.photos(existing)>=Attachment.MAX_PHOTOS) ||
-                    (item.kind!=Attachment.Kind.PHOTO && Attachment.documents(existing)>=Attachment.MAX_DOCUMENTS)) return false;
-            insertAttachment(db,chat,branch,null,item);
-            db.setTransactionSuccessful(); return true;
+                    (item.kind!=Attachment.Kind.PHOTO && Attachment.documents(existing)>=Attachment.MAX_DOCUMENTS)) return 0;
+            long id=insertAttachment(db,chat,branch,null,item);
+            db.setTransactionSuccessful(); return id;
+        } finally { db.endTransaction(); }
+    }
+    void recordImports(long user,DraftImporter.Batch batch) {
+        int position=0;
+        for (android.net.Uri uri:batch.remaining) getWritableDatabase().execSQL("INSERT INTO message_import VALUES(?,?,?,?)",
+                new Object[]{user,position++,uri.toString(),batch.document?1:0});
+    }
+    DraftImporter.Batch pendingImports(long chat,long branch,long user) {
+        List<android.net.Uri> uris=new ArrayList<>(); boolean document=false;
+        try (Cursor c=getReadableDatabase().rawQuery("SELECT uri,document FROM message_import WHERE message=? ORDER BY position",args(user))) {
+            while (c.moveToNext()) { uris.add(android.net.Uri.parse(c.getString(0))); document=c.getInt(1)!=0; }
+        }
+        return uris.isEmpty()?null:new DraftImporter.Batch(chat,branch,uris,document,null);
+    }
+    boolean needsUri(android.net.Uri uri) {
+        return android.database.DatabaseUtils.longForQuery(getReadableDatabase(),"SELECT EXISTS(SELECT 1 FROM message_import WHERE uri=?)",
+                new String[]{uri.toString()})!=0;
+    }
+    List<android.net.Uri> importSources(long chat) {
+        List<android.net.Uri> result=new ArrayList<>();
+        try (Cursor c=getReadableDatabase().rawQuery("SELECT i.uri FROM message_import i JOIN message m ON i.message=m.id WHERE m.chat=?",args(chat))) {
+            while (c.moveToNext()) result.add(android.net.Uri.parse(c.getString(0)));
+        }
+        return result;
+    }
+    long finishImport(DraftImporter.Batch batch,android.net.Uri uri,Attachment item) {
+        SQLiteDatabase db=getWritableDatabase(); db.beginTransaction();
+        try {
+            if (db.delete("message_import","message=? AND uri=? AND EXISTS(SELECT 1 FROM branch_message WHERE branch=? AND message=?)",
+                    new String[]{Long.toString(batch.user),uri.toString(),Long.toString(batch.branch),Long.toString(batch.user)})!=1) return 0;
+            long id=item==null?0:insertAttachment(db,batch.chat,batch.branch,batch.user,item);
+            db.setTransactionSuccessful(); return id;
         } finally { db.endTransaction(); }
     }
     void removeDraft(long chat,long id,Diagnostics log) {
@@ -374,14 +430,17 @@ final class History extends SQLiteOpenHelper {
         cleanDeletedPhotos(log);
     }
     long begin(long chat,String text,List<Attachment> files) {
+        return begin(chat,chat(chat).branch,text,files,"");
+    }
+    long begin(long chat,long branch,String text,List<Attachment> files,String pendingTitle) {
         SQLiteDatabase db = getWritableDatabase(); db.beginTransaction();
         try {
             String title=text.replace('\n',' ').trim();
             if (title.isEmpty() && !files.isEmpty()) title=files.get(0).kind==Attachment.Kind.PHOTO ? "图片对话" : files.get(0).name;
+            if (title.isEmpty()) title=pendingTitle;
             int end=title.offsetByCodePoints(0,Math.min(22,title.codePointCount(0,title.length())));
             db.execSQL("UPDATE chat SET updated=?, title=CASE WHEN EXISTS(SELECT 1 FROM message WHERE chat=?) THEN title ELSE ? END WHERE id=?",
                     new Object[]{System.currentTimeMillis(),chat,title.substring(0,end),chat});
-            long branch=chat(chat).branch;
             long user=append(db,chat,branch,"user",text,"done",0);
             for (Attachment item:files) {
                 if (item.id==0) insertAttachment(db,chat,branch,user,item);
@@ -466,6 +525,8 @@ final class History extends SQLiteOpenHelper {
             long branch=fork(db,source,message-1);
             long id=append(db,chat,branch,old.role,text,"done",old.family);
             for (Attachment file:old.attachments) insertAttachment(db,chat,branch,id,file);
+            if (old.missing>0) db.execSQL("INSERT INTO message_import SELECT ?,position,uri,document FROM message_import WHERE message=?",
+                    new Object[]{id,old.id});
             db.setTransactionSuccessful(); return id;
         } finally { db.endTransaction(); }
     }
@@ -486,9 +547,29 @@ final class History extends SQLiteOpenHelper {
         SQLiteDatabase db=getWritableDatabase(); db.beginTransaction();
         try {
             Chat source=chat(chat);
-            if (last(source.branch,Long.MAX_VALUE)!=user || !"user".equals(at(source.branch,user).role)) throw new SQLiteException("stale-user");
-            long id=append(db,chat,source.branch,"assistant","","pending",0);
+            long id=answerOnBranch(chat,source.branch,user);
             db.setTransactionSuccessful(); return id;
+        } finally { db.endTransaction(); }
+    }
+    long answerOnBranch(long chat,long branch,long user) {
+        if (last(branch,Long.MAX_VALUE)!=user || !"user".equals(at(branch,user).role)) throw new SQLiteException("stale-user");
+        return append(getWritableDatabase(),chat,branch,"assistant","","pending",0);
+    }
+    long retry(long chat,long user,long answer,boolean unsaved) {
+        SQLiteDatabase db=getWritableDatabase(); db.beginTransaction();
+        try {
+            Chat source=chat(chat); Message old=at(source.branch,answer);
+            if (!("interrupted".equals(old.state) || unsaved && "pending".equals(old.state)) || !"assistant".equals(old.role) || last(source.branch,answer)!=user)
+                throw new SQLiteException("stale-retry");
+            long owners=android.database.DatabaseUtils.longForQuery(db,"SELECT COUNT(*) FROM branch_message WHERE message=?",args(answer));
+            if (owners==1 && last(source.branch,Long.MAX_VALUE)==answer) {
+                db.execSQL("UPDATE message SET body='',state='pending',error=NULL,anchor_remote=NULL,anchor_seq=NULL WHERE id=?",args(answer));
+            } else {
+                rememberVersion(source.branch,answer);
+                long branch=fork(db,source,user);
+                answer=append(db,chat,branch,"assistant","","pending",old.family);
+            }
+            db.setTransactionSuccessful(); return answer;
         } finally { db.endTransaction(); }
     }
     long switchVersion(long chat,long message,int direction) {

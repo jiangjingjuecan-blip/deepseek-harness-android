@@ -15,6 +15,8 @@ public final class HarnessApp extends Application {
     volatile String serviceState="starting";
     volatile String serviceFailure="";
     private Runnable listener;
+    private volatile Runnable streamListener;
+    private final java.util.concurrent.atomic.AtomicBoolean streamPosted=new java.util.concurrent.atomic.AtomicBoolean();
     @Override public void onCreate() {
         super.onCreate();
         log=new Diagnostics(getNoBackupFilesDir());
@@ -27,6 +29,14 @@ public final class HarnessApp extends Application {
         account=new Account(this); chat=new ChatEngine(this,Guest.CHAT_DIR);
     }
     void listen(Runnable callback) { listener=callback; }
+    void listenStream(Runnable callback) { streamListener=callback; }
+    void streamChanged() {
+        if (streamListener!=null && streamPosted.compareAndSet(false,true)) main.post(()->
+            android.view.Choreographer.getInstance().postFrameCallback(t->{
+                streamPosted.set(false);
+                if (streamListener!=null) streamListener.run();
+            }));
+    }
     private final Runnable notifyChange=() -> { if (listener!=null) listener.run(); };
     void changed() { main.removeCallbacks(notifyChange); main.post(notifyChange); }
     void notice(String message) { main.post(() -> Toast.makeText(this,message,Toast.LENGTH_SHORT).show()); }

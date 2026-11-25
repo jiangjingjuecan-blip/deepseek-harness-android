@@ -65,6 +65,7 @@ coverage/
 
 # 本地协作记录
 /docs/CODEX_BRIEF*.md
+/docs/briefs/
 
 # 单次浏览器授权和本机复现数据
 /docs/prototype/LOGIN_READY.txt

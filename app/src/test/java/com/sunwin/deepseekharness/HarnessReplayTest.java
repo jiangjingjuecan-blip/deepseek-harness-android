@@ -69,7 +69,7 @@ public class HarnessReplayTest {
                 List<Attachment> image=turn==0 ? batch : turn==3 ? Collections.singletonList(Attachment.photo(photo)) : Collections.emptyList();
                 assertTrue(chat.send(id,prompts[turn],image));
                 if (turn==0) {
-                    await("first delta written to SQLite",()->!chat.busy() || "紫".equals(app.history.messages(id).get(1).text));
+                    await("first delta written to SQLite",()->{ List<History.Message> rows=app.history.messages(id); return !chat.busy() || rows.size()==2 && "紫".equals(rows.get(1).text); });
                     assertEquals("紫",app.history.messages(id).get(1).text);
                     command(p,"advance");
                 }

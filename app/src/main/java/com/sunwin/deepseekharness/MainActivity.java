@@ -41,11 +41,17 @@ public final class MainActivity extends Activity {
     private String screen="chat", draft="", cameraPath;
     private boolean openLogin, visible;
     private LinearLayout root, content, thread, intro, attachment;
-    private ScrollView scroll;
+    private ConversationScroll scroll;
+    private History.Chat selectedChat;
+    private ImageButton jumpButton;
+    private ChatEngine.Work live,awaitingDraw;
+    private Typewriter writer;
+    private boolean stopIcon;
+    private final Set<ChatEngine.Work> adoptions=new LinkedHashSet<>();
     private TextView header, subtitle, meter, branchButton;
     private EditText input;
     private ImageButton send;
-    private final HashMap<Long,TextView> bubbles=new HashMap<>();
+    private final HashMap<Long,Bubble> bubbles=new HashMap<>();
     private String introKey="";
     private android.content.SharedPreferences preferences() { return getSharedPreferences("ui",MODE_PRIVATE); }
 
@@ -83,9 +89,17 @@ public final class MainActivity extends Activity {
     }
     private void startRuntime() { startForegroundService(new Intent(this,HarnessService.class)); }
     @Override public void onResume() {
-        super.onResume(); visible=true; app.listen(this::update); app.account.refresh(false); update();
+        super.onResume(); visible=true;
+        if (live!=null && live.ended) { live=null; writer=null; }
+        app.listen(this::update); app.listenStream(()->{ if (visible && "chat".equals(screen)) paintLive(); }); app.account.refresh(false); update();
     }
-    @Override public void onPause() { app.history.textDraft(draftBranch,draft); visible=false; app.listen(null); super.onPause(); }
+    private void saveDraft() {
+        app.chat.savingDraft(draftBranch); app.history.textDraft(draftBranch,draft);
+    }
+    @Override public void onPause() {
+        dispatchPending(); saveDraft(); visible=false; app.listen(null); app.listenStream(null);
+        super.onPause();
+    }
     @Override public void onDestroy() { files.shutdown(); thumbnails.shutdownNow(); super.onDestroy(); }
     @Override public void onSaveInstanceState(Bundle b) {
         super.onSaveInstanceState(b);
@@ -104,12 +118,15 @@ public final class MainActivity extends Activity {
         if (input!=null) getSystemService(InputMethodManager.class).hideSoftInputFromWindow(input.getWindowToken(),0);
         screen=page; draw();
     }
-    private void draw() {
+    private void draw() { draw(null); }
+    private void draw(ChatEngine.Work generating) {
+        dispatchPending(); live=null; writer=null; adoptions.clear();
         long selected=app.history.chat(chatId).branch;
         if (draftBranch!=selected) {
-            app.history.textDraft(draftBranch,draft); draftBranch=selected; draft=app.history.textDraft(selected);
+            saveDraft(); draftBranch=selected; draft=app.history.textDraft(selected);
         }
-        input=null; send=null; introKey=""; bubbles.clear();
+        if (generating!=null && generating.chat.branch==selected) watch(generating);
+        input=null; send=null; stopIcon=false; introKey=""; bubbles.clear();
         root=a.column(); root.setBackgroundColor(PAPER); root.setFocusableInTouchMode(true);
         setContentView(root);
         boolean chat="chat".equals(screen);
@@ -140,7 +157,7 @@ public final class MainActivity extends Activity {
         update();
     }
     private void update() {
-        if (root==null || isFinishing()) return;
+        if (root==null || isFinishing() || awaitingDraw!=null) return;
         if (openLogin && app.account.authorize!=null && visible && app.account.pending()) {
             openLogin=false; launchAuthorization(false);
         } else if (!app.account.loading && !app.account.pending() && !"".equals(app.account.phase)) openLogin=false;
@@ -151,7 +168,7 @@ public final class MainActivity extends Activity {
             default:
                 History.Chat chat=app.history.chat(chatId);
                 if (chat.branch!=draftBranch) { draw(); return; }
-                header.setText(chat.title); branchButton.setText(chat.number==1 ? "分支" : "分支 "+chat.number);
+                selectedChat=chat; header.setText(chat.title); branchButton.setText(chat.number==1 ? "分支" : "分支 "+chat.number);
                 String percent=app.history.meter(chatId,app.account.selected).percent();
                 meter.setText(percent); meter.setContentDescription("上下文用量 "+percent);
                 Loopback api=app.api;
@@ -169,19 +186,36 @@ public final class MainActivity extends Activity {
         }
     }
     private void buildChat() {
-        scroll=new ScrollView(this); scroll.setFillViewport(true); scroll.setVerticalScrollBarEnabled(false);
-        content.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
+        FrameLayout viewport=new FrameLayout(this);
+        content.addView(viewport,new LinearLayout.LayoutParams(-1,0,1));
+        scroll=new ConversationScroll(this,a.dp(48)); scroll.setFillViewport(true); scroll.setVerticalScrollBarEnabled(false);
+        viewport.addView(scroll,new FrameLayout.LayoutParams(-1,-1));
+        jumpButton=a.icon(R.drawable.ic_send,"跳到最新",scroll::latest);
+        jumpButton.setTooltipText(null); jumpButton.setRotation(180); a.buttonStyle(jumpButton,WHITE,24); jumpButton.setElevation(a.dp(2));
+        FrameLayout.LayoutParams jumpSize=new FrameLayout.LayoutParams(a.dp(44),a.dp(44),Gravity.BOTTOM|Gravity.END);
+        jumpSize.setMargins(0,0,a.dp(16),a.dp(8)); viewport.addView(jumpButton,jumpSize); scroll.jumpButton(jumpButton);
         LinearLayout canvas=a.column(); a.pad(canvas,20,14); scroll.addView(canvas);
         intro=a.column(); intro.setGravity(Gravity.CENTER); canvas.addView(intro,new LinearLayout.LayoutParams(-1,0,1));
         thread=a.column(); canvas.addView(thread,a.size(-1,-2));
         LinearLayout composer=a.column(); a.pad(composer,8,6); composer.setBackground(a.shape(WHITE,22,LINE));
         LinearLayout.LayoutParams box=a.size(-1,-2); box.setMargins(a.dp(14),a.dp(4),a.dp(14),a.dp(12)); content.addView(composer,box);
-        attachmentScroll=new HorizontalScrollView(this); attachmentScroll.setHorizontalScrollBarEnabled(false);
+        attachmentScroll=new ComposerInput.Tray(this); attachmentScroll.setHorizontalScrollBarEnabled(false);
         composer.addView(attachmentScroll,a.size(-1,-2));
         attachment=a.row(); attachmentScroll.addView(attachment); shownDraft=null;
-        input=new EditText(this); input.setTextSize(17); input.setTextColor(INK); input.setHintTextColor(DIM);
+        input=new ComposerInput(this); input.setTextSize(17); input.setTextColor(INK); input.setHintTextColor(DIM);
         input.setHint("输入消息"); input.setBackgroundColor(WHITE); a.pad(input,10,7);
         input.setInputType(android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+        input.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_NONE|android.view.inputmethod.EditorInfo.IME_FLAG_NO_ENTER_ACTION);
+        input.setOnEditorActionListener((v,action,event)->{
+            if (event!=null || (action!=android.view.inputmethod.EditorInfo.IME_ACTION_SEND &&
+                    action!=android.view.inputmethod.EditorInfo.IME_ACTION_DONE)) return false;
+            Editable value=input.getText();
+            if (android.view.inputmethod.BaseInputConnection.getComposingSpanStart(value)<0) {
+                int start=Math.max(0,input.getSelectionStart()),end=Math.max(0,input.getSelectionEnd());
+                value.replace(Math.min(start,end),Math.max(start,end),"\n");
+            }
+            return true;
+        });
         input.setMaxLines(5); input.setMinHeight(a.dp(48)); input.setGravity(Gravity.CENTER_VERTICAL|Gravity.START);
         input.setText(draft); input.setSelection(input.length()); composer.addView(input,a.size(-1,-2));
         input.addTextChangedListener(new TextWatcher() {
@@ -198,17 +232,35 @@ public final class MainActivity extends Activity {
         tools.addView(dice,a.size(44,48));
         tools.addView(new View(this),new LinearLayout.LayoutParams(0,1,1));
         send=a.icon(R.drawable.ic_send,"发送",this::send); a.buttonStyle(send,BLUE,15); send.setColorFilter(WHITE);
+        android.animation.StateListAnimator press=new android.animation.StateListAnimator();
+        press.addState(new int[]{android.R.attr.state_pressed},scaleSend(.94f));
+        press.addState(new int[0],scaleSend(1f)); send.setStateListAnimator(press);
         tools.addView(send,a.size(48,46));
+    }
+    private android.animation.Animator scaleSend(float scale) {
+        android.animation.ObjectAnimator animator=android.animation.ObjectAnimator.ofPropertyValuesHolder(send,
+                android.animation.PropertyValuesHolder.ofFloat(View.SCALE_X,scale),
+                android.animation.PropertyValuesHolder.ofFloat(View.SCALE_Y,scale));
+        animator.setDuration(85); return animator;
     }
     private void renderMessages() {
         List<History.Message> rows=app.history.messages(chatId);
+        for (Iterator<ChatEngine.Work> it=adoptions.iterator();it.hasNext();) {
+            ChatEngine.Work w=it.next();
+            if (w.row==0) continue;
+            adopt(w.localUser,w.user); adopt(w.localReply,w.row); it.remove();
+        }
+        List<ChatEngine.Work> outgoing=app.chat.outbox(draftBranch);
+        ChatEngine.Work current=app.chat.latest;
+        if (current!=null && current.chat.branch==draftBranch && !current.ended && current!=live) watch(current);
         History.Message tail=rows.isEmpty() ? null : rows.get(rows.size()-1);
         tailUser=tail!=null && "user".equals(tail.role) ? tail.id : 0;
         pendingDice=tail!=null && "dice".equals(tail.role);
         lastAssistant=0;
         for (History.Message row:rows) if ("assistant".equals(row.role)) lastAssistant=row.id;
-        intro.setVisibility(rows.isEmpty()?View.VISIBLE:View.GONE);
-        if (rows.isEmpty()) {
+        boolean empty=rows.isEmpty() && outgoing.isEmpty();
+        intro.setVisibility(empty?View.VISIBLE:View.GONE);
+        if (empty) {
             String key=status()+"|"+app.account.stored;
             if (!key.equals(introKey)) {
                 introKey=key; intro.removeAllViews();
@@ -225,63 +277,236 @@ public final class MainActivity extends Activity {
             }
             return;
         }
-        boolean bottom=scroll.getScrollY()+scroll.getHeight()>=thread.getHeight()-a.dp(64);
+        Bubble user=null;
         for (History.Message m:rows) {
-            TextView body=bubbles.get(m.id);
-            if (body==null) {
-                boolean user="user".equals(m.role);
-                LinearLayout group=a.column(); group.setGravity(user?Gravity.END:Gravity.START);
-                LinearLayout.LayoutParams gp=a.size(-1,-2); gp.bottomMargin=a.dp(16);
-                if (user) gp.leftMargin=a.dp(34); else gp.rightMargin=a.dp(18); thread.addView(group,gp);
-                LinearLayout actions=a.row(); group.addView(actions,a.size(-2,-2));
-                boolean dice="dice".equals(m.role);
-                if (!user) actions.addView(a.text(dice?"骰子":"DeepSeek",12,DIM,true));
+            Bubble bubble=bubble(m);
+            if ("user".equals(m.role)) { user=bubble; user.retry(null,0); user.progress(false,m.missing,m.documents); }
+            if (user!=null && "assistant".equals(m.role) && "interrupted".equals(m.state) && !"已停止".equals(m.error))
+                user.retry(null,m.id);
+            if (live==null || m.id!=live.row) body(bubble,m.text,m.state,m.error);
+            else if (bubble.text.length()==0) body(bubble,"","pending",null);
+        }
+        for (ChatEngine.Work w:outgoing) {
+            if (w.row==0) optimistic(w);
+            else if (w.unsaved && bubbles.containsKey(w.row) && bubbles.containsKey(w.user)) {
+                body(bubbles.get(w.row),w.body,"interrupted",w.error); bubbles.get(w.user).retry(null,w.row);
+            }
+        }
+        if (live!=null) scheduleFrame();
+    }
+    private void adopt(long key,long id) {
+        if (key==id || id==0) return;
+        Bubble bubble=bubbles.remove(key);
+        if (bubble!=null) {
+            bubble.id=id; Bubble duplicate=bubbles.put(id,bubble);
+            if (duplicate!=null && duplicate!=bubble) thread.removeView(duplicate.group);
+        }
+    }
+    private final class Bubble {
+        long id,retryId;
+        History.Message metadata;
+        final LinearLayout group=a.column(),actions=a.row();
+        final TextView text;
+        LinearLayout fileBox;
+        TextView retry,placeholder;
+        ProgressBar progress;
+        ChatEngine.Work localRetry;
+        Typewriter painted;
+        int revision;
+        List<Attachment> files=Collections.emptyList();
+        Bubble(History.Message m) {
+            id=m.id;
+            boolean user="user".equals(m.role),dice="dice".equals(m.role);
+            group.setGravity(user?Gravity.END:Gravity.START);
+            LinearLayout.LayoutParams gp=a.size(-1,-2); gp.bottomMargin=a.dp(16);
+            if (user) gp.leftMargin=a.dp(34); else gp.rightMargin=a.dp(18);
+            thread.addView(group,gp); group.addView(actions,a.size(-2,-2));
+            text=a.text("",16,INK,false); text.setTextIsSelectable(true);
+            View.OnLongClickListener hold=v->{ if (id>0) messageMenu(id); return true; };
+            group.setOnLongClickListener(hold); text.setOnLongClickListener(hold);
+            if (user || dice) { text.setBackground(a.shape(PALE,17,0)); a.pad(text,14,11); }
+            else {
+                a.pad(text,0,3); text.setOnClickListener(v->{
+                    if (live!=null && isReply(this)) { writer.finish(); paintLive(); }
+                });
+                group.setOnClickListener(v->text.performClick());
+            }
+            group.addView(text,a.size(-2,-2));
+        }
+        void bind(History.Message m) {
+            if (metadata==null || metadata.saved!=m.saved || metadata.version!=m.version || metadata.versions!=m.versions) {
+                actions.removeAllViews(); progress=null; retry=null;
+                if (!"user".equals(m.role)) actions.addView(a.text("dice".equals(m.role)?"骰子":"DeepSeek",12,DIM,true));
                 if (m.saved) { TextView mark=a.text("存档",12,BLUE,true); a.pad(mark,5,0); actions.addView(mark); }
                 if (m.versions>1) {
-                    versionArrow(actions,m,-1);
-                    actions.addView(a.text(m.version+"/"+m.versions,12,DIM,false));
-                    versionArrow(actions,m,1);
+                    versionArrow(actions,m,-1); actions.addView(a.text(m.version+"/"+m.versions,12,DIM,false)); versionArrow(actions,m,1);
                 }
-                TextView more=a.button("⋯",false,()->messageMenu(m.id));
-                more.setContentDescription("消息操作"); a.buttonStyle(more,PAPER,10); a.pad(more,2,0);
-                actions.addView(more,a.size(36,32));
-                group.setOnLongClickListener(v->{ messageMenu(m.id); return true; });
-                if (!m.attachments.isEmpty()) messageFiles(group,m.attachments);
-                body=a.text("",16,INK,false); body.setTextIsSelectable(true);
-                body.setOnLongClickListener(v->{ messageMenu(m.id); return true; });
-                if (user || dice) { body.setBackground(a.shape(PALE,17,0)); a.pad(body,14,11); }
-                else a.pad(body,0,3);
-                group.addView(body,a.size(-2,-2)); bubbles.put(m.id,body);
+                TextView more=a.button("⋯",false,()->{ if (id>0) messageMenu(id); });
+                more.setContentDescription("消息操作"); a.buttonStyle(more,PAPER,10); a.pad(more,2,0); actions.addView(more,a.size(36,32));
             }
-            String text=m.text;
-            if ("dice".equals(m.role) && text.startsWith("[骰子 ") && text.endsWith("]"))
-                text=text.substring(4,text.length()-1).replace(" | ","  ·  ");
-            if ("user".equals(m.role) && text.isEmpty() && m.attachments.isEmpty()) text="判定";
-            if ("pending".equals(m.state) && text.isEmpty()) text="正在回复…";
-            if ("interrupted".equals(m.state)) {
-                String reason=TextUtils.isEmpty(m.error)?"回复已中断":m.error;
-                text=text.isEmpty()?reason:text+"\n（"+reason+"）";
+            metadata=m;
+            if (!sameFiles(files,m.attachments)) {
+                files=new ArrayList<>(m.attachments);
+                if (fileBox==null) { fileBox=a.column(); group.addView(fileBox,1); }
+                fileBox.removeAllViews(); messageFiles(fileBox,files);
             }
-            body.setVisibility(text.isEmpty()?View.GONE:View.VISIBLE);
-            if (!TextUtils.equals(text,body.getText())) body.setText(text);
         }
-        if (bottom) scroll.post(()->scroll.scrollTo(0,thread.getBottom()));
+        void progress(boolean show,int remaining,boolean document) {
+            if (show && progress==null) { progress=new ProgressBar(MainActivity.this,null,android.R.attr.progressBarStyleSmall);
+                progress.setContentDescription("处理中"); actions.addView(progress,a.size(18,18)); }
+            if (progress!=null) progress.setVisibility(show?View.VISIBLE:View.GONE);
+            if (remaining>0 && placeholder==null) {
+                placeholder=a.text("",13,DIM,false); group.addView(placeholder,1);
+            }
+            if (placeholder!=null) {
+                placeholder.setVisibility(remaining>0?View.VISIBLE:View.GONE);
+                if (remaining>0) placeholder.setText((document?"文件":"照片")+" ×"+remaining);
+            }
+        }
+        void retry(ChatEngine.Work work,long answer) {
+            localRetry=work; retryId=answer;
+            boolean show=work!=null || answer!=0;
+            if (show && retry==null) {
+                retry=a.button("重试",false,()->{
+                    if (app.chat.busy() || !connectedForRetry()) return;
+                    if (localRetry!=null) {
+                        if (app.chat.retryLocal(localRetry)) { watch(localRetry); update(); } else toast("未连接");
+                    } else if (app.chat.retry(chatId,id,retryId)) {
+                        ChatEngine.Work next=app.chat.latest;
+                        if (next.chat.branch!=draftBranch) draw(next); else { watch(next); update(); }
+                    }
+                    else toast("未连接");
+                });
+                actions.addView(retry,a.size(-2,34));
+            }
+            if (retry!=null) retry.setVisibility(show?View.VISIBLE:View.GONE);
+        }
+    }
+    private static boolean sameFiles(List<Attachment> a,List<Attachment> b) {
+        if (a.size()!=b.size()) return false;
+        for (int i=0;i<a.size();i++) if (a.get(i).id!=b.get(i).id || !a.get(i).paths.equals(b.get(i).paths)) return false;
+        return true;
+    }
+    private Bubble bubble(History.Message m) {
+        Bubble b=bubbles.get(m.id);
+        if (b==null) { b=new Bubble(m); bubbles.put(m.id,b); }
+        b.bind(m); return b;
+    }
+    private void body(Bubble b,String value,String state,String error) {
+        b.painted=null;
+        String text=value;
+        if ("dice".equals(b.metadata.role) && text.startsWith("[骰子 ") && text.endsWith("]"))
+            text=text.substring(4,text.length()-1).replace(" | ","  ·  ");
+        if ("user".equals(b.metadata.role) && text.isEmpty() && b.files.isEmpty() && b.placeholder==null) text="判定";
+        if ("pending".equals(state) && text.isEmpty()) text="正在回复…";
+        if ("interrupted".equals(state)) {
+            String reason=TextUtils.isEmpty(error)?"回复已中断":error;
+            text=text.isEmpty()?reason:text+"\n（"+reason+"）";
+        }
+        b.text.setVisibility(text.isEmpty()?View.GONE:View.VISIBLE);
+        if (!TextUtils.equals(text,b.text.getText())) b.text.setText(text);
+    }
+    private void optimistic(ChatEngine.Work w) {
+        adoptions.add(w);
+        intro.setVisibility(View.GONE);
+        Bubble user;
+        if (w.answerUser==0) {
+            History.Message m=new History.Message(w.localUser,"user",w.text,w.attachments());
+            user=bubble(m);
+            user.progress(w.preparing,w.batch==null?0:w.batch.remaining.size(),w.batch!=null && w.batch.document);
+            body(user,m.text,"done",null);
+        } else user=bubbles.get(w.answerUser);
+        if (user!=null) user.retry(w.error!=null?w:null,0);
+        Bubble assistant=bubble(new History.Message(w.localReply,"assistant","",Collections.emptyList()));
+        body(assistant,"",w.error==null?"pending":"interrupted",w.error);
+    }
+    private void watch(ChatEngine.Work w) {
+        if (live!=null && live!=w) { writer.finish(); paintLive(); }
+        live=w; writer=new Typewriter(preferences().getInt(Typewriter.PREF,Typewriter.DEFAULT_SPEED));
+    }
+    private boolean isReply(Bubble b) { return b.id==live.row || b.id==live.localReply; }
+    private void scheduleFrame() {
+        if (visible && "chat".equals(screen) && live!=null) app.streamChanged();
+    }
+    private void paintLive() {
+        if (live==null) return;
+        Bubble b=bubbles.get(live.row==0?live.localReply:live.row);
+        if (b==null) return;
+        long now=SystemClock.uptimeMillis();
+        writer.receive(live.body,now);
+        if (live.ended) writer.end(now);
+        if (live.error!=null || live.stopped) writer.finish();
+        writer.advance(now);
+        String received=writer.text();
+        if (writer.length()==0 || live.error!=null) body(b,received.isEmpty() || writer.length()==0?"":received,
+                live.error!=null?"interrupted":"pending",live.error);
+        else {
+            int n=writer.length();
+            int previous=b.text.length();
+            if (b.painted!=writer || b.revision!=writer.revision() || previous>n) {
+                b.text.setText(received.substring(0,n),TextView.BufferType.EDITABLE);
+                b.painted=writer; b.revision=writer.revision();
+            } else if (previous<n) b.text.append(received,previous,n);
+            b.text.setVisibility(View.VISIBLE);
+        }
+        Bubble user=bubbles.get(live.user!=0?live.user:live.localUser);
+        if (user!=null) user.progress(live.preparing && !live.ended,live.batch!=null?live.batch.remaining.size():0,
+                live.batch!=null && live.batch.document);
+        if (!live.ended && live.usage!=null && live.model.equals(app.account.selected)) {
+            String percent=live.usage.percent();
+            if (!TextUtils.equals(percent,meter.getText())) { meter.setText(percent); meter.setContentDescription("上下文用量 "+percent); }
+        }
+        if (writer.moving()) scheduleFrame();
     }
     private void updateSend() {
         if (send==null) return;
-        boolean can=!app.chat.busy() && !app.imports.busy(chatId) && (!draft.trim().isEmpty() || !draftFiles.isEmpty() || pendingDice || tailUser!=0);
-        send.setEnabled(can); send.setAlpha(can?1f:.44f);
+        ChatEngine.Work stopping=app.chat.stoppingTarget();
+        boolean stop=stopping!=null && stopping.chat.id==chatId;
+        if (stopIcon!=stop) {
+            stopIcon=stop; String label=stop?"停止":"发送";
+            send.setImageResource(stop?R.drawable.ic_stop:R.drawable.ic_send); send.setContentDescription(label); send.setTooltipText(label);
+        }
+        boolean can=stop ? !stopping.stopped : !app.chat.busy() && (!draft.trim().isEmpty() || !draftFiles.isEmpty() ||
+                app.imports.available(chatId,draftBranch)!=null || pendingDice || tailUser!=0);
+        send.setEnabled(can); send.setAlpha(can?1f:.40f);
+    }
+    private boolean connectedForRetry() {
+        if (app.api==null) { if (retryService()) startRuntime(); else toast(status()); return false; }
+        if (!app.account.stored) { login(); return false; }
+        if (app.account.selected.isEmpty()) { app.account.refresh(true); toast("模型未就绪"); return false; }
+        return true;
     }
     private void send() {
-        if (app.api==null) { toast(status()); if (retryService()) startRuntime(); return; }
-        if (!app.account.stored) { login(); return; }
-        if (app.account.selected.isEmpty()) {
-            toast(app.account.modelError.isEmpty() ? "正在获取可用模型" : app.account.modelError);
-            app.account.refresh(true); return;
-        }
-        boolean answering=tailUser!=0 && draft.trim().isEmpty() && draftFiles.isEmpty();
-        boolean sent=answering ? app.chat.answerUser(chatId,tailUser) : app.chat.send(chatId,draft.trim(),app.history.draft(chatId));
-        if (sent) { input.setText(""); app.history.textDraft(draftBranch,""); update(); }
+        if (stopIcon) { app.chat.interrupt(); updateSend(); return; }
+        DraftImporter.Batch batch=app.imports.available(chatId,draftBranch);
+        long answer=draft.trim().isEmpty() && draftFiles.isEmpty() && batch==null ? tailUser : 0;
+        ChatEngine.Work w=app.chat.reserve(selectedChat,draft.trim(),draftFiles,batch,answer,pendingDice);
+        if (w==null) return;
+        awaitingDraw=w;
+        send.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+        watch(w); input.setText(""); showDraft(Collections.emptyList()); optimistic(w); updateSend();
+        View surface=root;
+        surface.getViewTreeObserver().addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
+            public boolean onPreDraw() {
+                surface.getViewTreeObserver().removeOnPreDrawListener(this);
+                Bubble user=bubbles.get(w.localUser); if (awaitingDraw==w && user!=null) scroll.showNew(user.group);
+                return true;
+            }
+        });
+        surface.getViewTreeObserver().addOnDrawListener(new ViewTreeObserver.OnDrawListener() {
+            boolean posted;
+            public void onDraw() {
+                if (posted) return; posted=true;
+                surface.post(()->{
+                    if (surface.getViewTreeObserver().isAlive()) surface.getViewTreeObserver().removeOnDrawListener(this);
+                    if (awaitingDraw==w) dispatchPending();
+                });
+            }
+        });
+        surface.invalidate();
+    }
+    private void dispatchPending() {
+        if (awaitingDraw!=null) { ChatEngine.Work w=awaitingDraw; awaitingDraw=null; app.chat.start(w); }
     }
     private void versionArrow(LinearLayout row,History.Message m,int direction) {
         TextView arrow=a.button(direction<0?"‹":"›",false,()->{
@@ -292,11 +517,11 @@ public final class MainActivity extends Activity {
         a.buttonStyle(arrow,PAPER,10); a.pad(arrow,0,0); row.addView(arrow,a.size(36,32));
     }
     private void jump(long id) {
-        TextView bubble=bubbles.get(id);
+        Bubble bubble=bubbles.get(id);
         if (bubble==null) return;
         scroll.post(()->{
-            Rect rect=new Rect(); View group=(View)bubble.getParent();
-            group.getDrawingRect(rect); scroll.offsetDescendantRectToMyCoords(group,rect); scroll.scrollTo(0,rect.top);
+            Rect rect=new Rect(); View group=bubble.group;
+            group.getDrawingRect(rect); scroll.offsetDescendantRectToMyCoords(group,rect); scroll.anchor(rect.top);
         });
     }
     private void showBranches() {
@@ -324,7 +549,7 @@ public final class MainActivity extends Activity {
                 labels.add("编辑"); actions.add(()->editMessage(m));
                 if ("assistant".equals(m.role) && id==lastAssistant) {
                     labels.add("重生成");
-                    actions.add(()->{ if (app.chat.regenerate(chatId,id)) draw(); else toast("未连接"); });
+                    actions.add(()->{ if (app.chat.regenerate(chatId,id)) draw(app.chat.latest); else toast("未连接"); });
                 }
             }
         }
@@ -433,7 +658,15 @@ public final class MainActivity extends Activity {
             for (String name:app.account.models) row(models,name,name.equals(app.account.selected)?"已选择":"",
                     ()->{ app.account.selected=name; app.changed(); });
         }
-        a.gap(page,28); LinearLayout other=card(page); row(other,"导出诊断日志","",this::exportLog);
+        a.gap(page,28); LinearLayout other=card(page);
+        int speed=preferences().getInt(Typewriter.PREF,Typewriter.DEFAULT_SPEED);
+        row(other,"显示速度",speed==0?"即时":speed+" 字/秒",()->{
+            int[] speeds={4,8,16,0}; String[] names={"4 字/秒","8 字/秒","16 字/秒","即时"};
+            new AlertDialog.Builder(this).setTitle("显示速度").setItems(names,(d,i)->{
+                preferences().edit().putInt(Typewriter.PREF,speeds[i]).apply(); showSettings();
+            }).show();
+        });
+        row(other,"导出诊断日志","",this::exportLog);
     }
     private void login() {
         if (app.account.pending() && app.account.authorize!=null) { launchAuthorization(false); return; }
@@ -474,13 +707,16 @@ public final class MainActivity extends Activity {
                 else if (!loading && !thumbnails.isShutdown()) {
                     loading=true;
                     int edge=Math.min(440,a.dp(148));
-                    thumbnails.execute(()->{
-                        try {
-                            Bitmap decoded=Photos.load(MainActivity.this,path,edge);
-                            thumbs.put(path,decoded); post(()->{ loading=false; invalidate(); });
-                        } catch (IOException e) {
-                            post(()->{ loading=false; failed=true; setImageResource(R.drawable.ic_gallery); });
-                        }
+                    post(()->{
+                        if (thumbnails.isShutdown()) return;
+                        thumbnails.execute(()->{
+                            try {
+                                Bitmap decoded=Photos.load(MainActivity.this,path,edge);
+                                thumbs.put(path,decoded); post(()->{ loading=false; invalidate(); });
+                            } catch (IOException e) {
+                                post(()->{ loading=false; failed=true; setImageResource(R.drawable.ic_gallery); });
+                            }
+                        });
                     });
                 }
             }
@@ -541,12 +777,23 @@ public final class MainActivity extends Activity {
         });
     }
     private void drawAttachment() {
-        draftFiles=app.history.draft(chatId);
+        DraftImporter.Batch batch=app.imports.available(chatId,draftBranch);
+        boolean complete=batch!=null && batch.done.getCount()==0;
+        List<Attachment> files=app.history.branchDraft(draftBranch);
+        for (ChatEngine.Work w:app.chat.outbox(draftBranch)) {
+            Set<Long> held=new HashSet<>(); for (Attachment f:w.attachments()) held.add(f.id);
+            files.removeIf(f->held.contains(f.id));
+        }
+        if (complete) app.imports.observed(batch);
+        showDraft(files);
+    }
+    private void showDraft(List<Attachment> files) {
+        draftFiles=files;
         List<Long> ids=new ArrayList<>();
         for (Attachment item:draftFiles) ids.add(item.id);
         if (ids.equals(shownDraft)) return;
         shownDraft=ids;
-        attachment.removeAllViews(); attachmentScroll.setVisibility(ids.isEmpty()?View.GONE:View.VISIBLE);
+        attachment.removeAllViews();
         List<String> paths=imagePaths(draftFiles);
         for (Attachment item:draftFiles) {
             if (item.kind==Attachment.Kind.PHOTO) {

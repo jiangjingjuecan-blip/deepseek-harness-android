@@ -33,8 +33,8 @@ public final class DeviceSmoke extends Instrumentation {
         try {
             if (!"ranchu".equals(Build.HARDWARE) && !Build.HARDWARE.contains("goldfish")) throw new AssertionError();
             String mode=options.getString("scenario","history");
-            if ("attachment-seed-v4".equals(mode) || "attachment-seed-v5".equals(mode) || "adventure-seed-v6".equals(mode)) {
-                stage=mode; seedOldPhoto(mode.endsWith("v4") ? 4 : mode.endsWith("v5") ? 5 : 6);
+            if ("attachment-seed-v4".equals(mode) || "attachment-seed-v5".equals(mode) || "adventure-seed-v6".equals(mode) || "send-seed-v7".equals(mode)) {
+                stage=mode; seedOldPhoto(mode.endsWith("v4") ? 4 : mode.endsWith("v5") ? 5 : mode.endsWith("v6") ? 6 : 7);
                 result.putString("passed",mode); finish(Activity.RESULT_OK,result); return;
             }
             if ("attachment-pdf".equals(mode)) {
@@ -63,11 +63,16 @@ public final class DeviceSmoke extends Instrumentation {
                 }
                 result.putString("passed",mode); finish(Activity.RESULT_OK,result); return;
             }
+            if (getTargetContext().getPackageManager().getComponentEnabledSetting(new ComponentName(
+                    getTargetContext(),HarnessService.class))==android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED) {
+                // The emulator can run the UI in isolation with the guest service disabled via pm.
+                ((HarnessApp)getTargetContext().getApplicationContext()).serviceState="stopped";
+            }
             activity=(MainActivity)startActivitySync(new Intent(getTargetContext(),MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             app=(HarnessApp)activity.getApplication();
-            if ("context".equals(mode) || "attachments".equals(mode) || "adventure-ui".equals(mode)) {
+            if ("context".equals(mode) || "attachments".equals(mode) || "adventure-ui".equals(mode) || "send-bench".equals(mode) || "send-ui".equals(mode)) {
                 DeviceContext test=new DeviceContext(this,activity);
-                try { test.run(Integer.parseInt(options.getString("fixturePort")),mode); }
+                try { test.run(Integer.parseInt(options.getString("fixturePort")),mode,result); }
                 finally { stage=test.stage; }
             } else if ("attachments-reopen".equals(mode) || "attachment-upgrade".equals(mode)) {
                 DeviceAttachments test=new DeviceAttachments(this,activity);
@@ -106,8 +111,8 @@ public final class DeviceSmoke extends Instrumentation {
                 long id=history.create();
                 long row=history.begin(id,"升级前照片",Collections.singletonList(Attachment.photo(path)));
                 history.update(row,"升级前回复","done");
-                if (version==6) {
-                    history.link(id,"fixture-upgrade-v6");
+                if (version>=6) {
+                    history.link(id,"fixture-upgrade-v"+version);
                     history.meter(id,"deepseek-flash",new ContextUsage(66,1048576,false));
                     target.getSharedPreferences("ui",0).edit().putLong("adventure-upgrade",id).commit();
                 }

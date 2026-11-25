@@ -38,7 +38,7 @@ public class AdventureHistoryTest {
         }
         long child,edited;
         try (History db=new History(ctx)) {
-            assertEquals(7,db.getReadableDatabase().getVersion());
+            assertEquals(8,db.getReadableDatabase().getVersion());
             assertEquals(1,db.branches(8).size()); assertEquals("original",db.chat(8).remote);
             assertEquals(50,db.meter(8,"deepseek-flash").used); assertEquals(1,db.draft(8).size());
             long main=db.chat(8).branch;

@@ -15,10 +15,31 @@ final class ChatEngine {
     private final ExecutorService cleanup=Executors.newSingleThreadExecutor();
     private volatile Work active;
     // SQLite can reuse both chat and message IDs. Only the original operation may publish a result.
-    private static final class Work {
-        final History.Chat chat;
-        final String model;
-        WebSocket socket;
+    private final List<Work> outbox=new CopyOnWriteArrayList<>();
+    private long nextKey=-1;
+    volatile Work latest;
+    static final class Work {
+        volatile History.Chat chat;
+        String model;
+        Loopback.Cancellation cancellation=new Loopback.Cancellation();
+        volatile WebSocket socket;
+        Loopback api;
+        long localUser,localReply,answerUser;
+        volatile long user,row;
+        volatile boolean started,stopped,ended,preparing,newDraftSaved,unsaved;
+        volatile String body="",error;
+        volatile ContextUsage usage;
+        String text="";
+        List<Attachment> files=Collections.emptyList();
+        DraftImporter.Batch batch;
+        List<Attachment> attachments() {
+            if (batch==null || batch.ready.isEmpty()) return files;
+            List<Attachment> result=new ArrayList<>(files);
+            Set<Long> ids=new HashSet<>();
+            for (Attachment f:files) ids.add(f.id);
+            for (Attachment f:batch.ready) if (ids.add(f.id)) result.add(f);
+            return result;
+        }
         Work(History.Chat chat,String model) { this.chat=chat; this.model=model; }
     }
     ChatEngine(HarnessApp app,String cwd) { this.app=app; this.cwd=cwd; }
@@ -27,12 +48,18 @@ final class ChatEngine {
         History.Chat chat=app.history.chat(id);
         if (chat==null) return current;
         List<String> sessions=app.history.sessions(id);
+        List<android.net.Uri> pending=app.history.importSources(id);
         long next=app.history.delete(id,current,app.log);
         app.imports.cancel(id);
         if (active!=null && active.chat.id==id) {
             if (active.socket!=null) active.socket.cancel();
             active=null;
         }
+        for (Work item:outbox) if (item.chat.id==id) {
+            if (item.batch!=null) item.batch.dispose(); outbox.remove(item);
+        }
+        if (latest!=null && latest.chat.id==id) latest=null;
+        for (android.net.Uri uri:pending) app.imports.release(uri);
         for (String session:sessions) archive(app.api,session);
         return next;
     }
@@ -51,50 +78,152 @@ final class ChatEngine {
         return true;
     }
     private synchronized void meter(Work work,ContextUsage usage) {
-        if (active==work) app.history.meterBranch(work.chat.branch,work.model,usage);
+        if (active==work) { app.history.meterBranch(work.chat.branch,work.model,usage); work.usage=usage; }
     }
     private synchronized void savePartial(Work work,long row,String body) {
         if (active==work) app.history.update(row,body,"pending");
     }
     private synchronized WebSocket follow(Work work,Loopback api,Feed feed) throws ChatFailure {
         if (active!=work) return null;
+        if (work.stopped) throw new ChatFailure("已停止");
         work.socket=api.follow(feed);
         return work.socket;
     }
     private synchronized void finish(Work work) {
+        if (work.row!=0 && !work.unsaved) outbox.remove(work);
         if (active==work) active=null;
         app.changed();
     }
-    synchronized boolean send(long chatId,String text,List<Attachment> files) {
-        if (!ready(chatId) || Attachment.photos(files)>Attachment.MAX_PHOTOS || Attachment.documents(files)>Attachment.MAX_DOCUMENTS) return false;
+    Work stoppingTarget() {
+        Work w=active; return w!=null && w.localReply!=0 && !w.ended ? w : null;
+    }
+    List<Work> outbox(long branch) {
+        List<Work> list=new ArrayList<>();
+        for (Work w:outbox) if (w.chat.branch==branch) list.add(w);
+        return list;
+    }
+    void savingDraft(long branch) {
+        for (Work w:outbox) if (w.chat.branch==branch) w.newDraftSaved=true;
+    }
+    synchronized Work reserve(History.Chat chat,String text,List<Attachment> files,DraftImporter.Batch batch,
+                              long answerUser,boolean dice) {
+        if (busy() || Attachment.photos(files)>Attachment.MAX_PHOTOS || Attachment.documents(files)>Attachment.MAX_DOCUMENTS ||
+                (text.isEmpty() && files.isEmpty() && batch==null && !dice && answerUser==0)) return null;
+        Work w=new Work(chat,app.account.selected);
+        w.api=app.api; w.text=text; w.files=new ArrayList<>(files); w.batch=batch; w.answerUser=answerUser;
+        if (batch!=null) batch.claimed=true;
+        w.preparing=!files.isEmpty() || batch!=null;
+        w.localUser=answerUser==0 ? nextKey-- : answerUser; w.localReply=nextKey--;
+        outbox.add(w); latest=active=w;
+        return w;
+    }
+    synchronized void start(Work w) {
+        if (active!=w || w.started) return;
+        w.started=true;
+        io.execute(()->prepare(w));
+    }
+    private void prepare(Work w) {
+        try {
+            History.Message user;
+            synchronized (this) {
+                if (active!=w) return;
+                synchronized (w.batch==null?w:w.batch) {
+                    History h=app.history;
+                    android.database.sqlite.SQLiteDatabase db=h.getWritableDatabase(); db.beginTransaction();
+                    long row; History.Chat source;
+                    try {
+                        String title=w.batch==null ? "" : w.batch.document?"文件对话":"图片对话";
+                        row=w.answerUser==0 ? h.begin(w.chat.id,w.chat.branch,w.text,w.attachments(),title)
+                                : h.answerOnBranch(w.chat.id,w.chat.branch,w.answerUser);
+                        user=h.at(w.chat.branch,h.last(w.chat.branch,row));
+                        if (w.batch!=null) h.recordImports(user.id,w.batch);
+                        if (!w.newDraftSaved) h.textDraft(w.chat.branch,"");
+                        source=h.branchChat(w.chat.branch);
+                        db.setTransactionSuccessful();
+                    } finally { db.endTransaction(); }
+                    w.chat=source; w.user=user.id; w.row=row;
+                    if (w.batch!=null) { app.imports.attached(w.batch,user.id); app.imports.retain(w.batch); }
+                }
+            }
+            app.changed();
+            if (w.api==null || w.api!=app.api || !app.account.stored || w.model.isEmpty()) {
+                String reason=w.api==null || w.api!=app.api ? "未连接" : !app.account.stored?"未登录":"模型未就绪";
+                throw new ChatFailure(w.stopped?"已停止":reason);
+            }
+            run(w.api,w,w.row,user,app.history.promptText(w.chat.branch,user),w.answerUser!=0);
+        } catch (Exception e) {
+            w.error=w.batch!=null && !w.batch.remaining.isEmpty()?"附件读取失败":ChatFailure.caught(e,SAVE_REPLY).getMessage();
+            synchronized (this) {
+                if (active!=w) return;
+                w.preparing=false; w.ended=true;
+                try { if (w.row!=0) {
+                    app.history.dirty(w.chat.branch); app.history.update(w.row,w.body,"interrupted",w.error);
+                } }
+                catch (android.database.sqlite.SQLiteException ex) { w.unsaved=true; }
+                finally { finish(w); }
+            }
+        }
+    }
+    synchronized boolean retryLocal(Work w) {
+        if (!ready() || !outbox.contains(w) || !w.ended) return false;
+        w.api=app.api; w.model=app.account.selected; w.cancellation=new Loopback.Cancellation(); w.error=null; w.ended=false; w.stopped=false; w.started=false;
+        w.preparing=w.batch!=null || !w.files.isEmpty();
+        if (w.batch!=null) app.imports.retry(w.batch);
+        active=latest=w; start(w); app.changed(); return true;
+    }
+    // Non-visual callers dispatch immediately. The activity dispatches from the first draw.
+    boolean send(long chatId,String text,List<Attachment> files) {
+        if (!ready()) return false;
         History.Chat chat=app.history.chat(chatId);
-        if (text.isEmpty() && files.isEmpty() && app.history.diceBefore(chat.branch,Long.MAX_VALUE).isEmpty()) return false;
-        return generate(chatId,()->app.history.begin(chatId,text,files),false);
+        Work w=reserve(chat,text,files,null,0,text.isEmpty() && !app.history.diceBefore(chat.branch,Long.MAX_VALUE).isEmpty());
+        if (w==null) return false;
+        start(w); return true;
     }
     synchronized boolean regenerate(long chat,long message) {
-        return ready(chat) && generate(chat,()->app.history.regenerate(chat,message),true);
+        return ready() && generate(chat,()->app.history.regenerate(chat,message));
+    }
+    synchronized boolean retry(long chat,long user,long message) {
+        if (!ready()) return false;
+        Work failed=null;
+        for (Work w:outbox) if (w.row==message && w.unsaved) failed=w;
+        boolean repair=failed!=null;
+        boolean ok=generate(chat,()->app.history.retry(chat,user,message,repair));
+        if (ok && repair) outbox.remove(failed);
+        return ok;
     }
     synchronized boolean answerUser(long chat,long user) {
-        return ready(chat) && generate(chat,()->app.history.answerUser(chat,user),true);
+        return ready() && generate(chat,()->app.history.answerUser(chat,user));
     }
-    private boolean ready(long chat) {
-        return !busy() && !app.imports.busy(chat) && app.api!=null && app.account.stored && !app.account.selected.isEmpty();
+    private boolean ready() {
+        return !busy() && app.api!=null && app.account.stored && !app.account.selected.isEmpty();
     }
-    private boolean generate(long chatId,java.util.function.LongSupplier insert,boolean fresh) {
-        Loopback api=app.api;
+    private boolean generate(long chatId,java.util.function.LongSupplier insert) {
         try {
-            long row=insert.getAsLong();
-            Work work=new Work(app.history.chat(chatId),app.account.selected);
-            long branch=work.chat.branch;
-            History.Message user=app.history.at(branch,app.history.last(branch,row));
-            String text=app.history.promptText(branch,user);
-            active=work; app.changed();
-            io.execute(() -> run(api,work,row,user,text,fresh));
-            return true;
+            Work w; long row; History.Message user; String text;
+            android.database.sqlite.SQLiteDatabase db=app.history.getWritableDatabase(); db.beginTransaction();
+            try {
+                row=insert.getAsLong();
+                w=new Work(app.history.chat(chatId),app.account.selected);
+                user=app.history.at(w.chat.branch,app.history.last(w.chat.branch,row));
+                text=app.history.promptText(w.chat.branch,user);
+                db.setTransactionSuccessful();
+            } finally { db.endTransaction(); }
+            w.api=app.api; w.localReply=w.row=row; w.user=user.id; w.started=true;
+            w.preparing=!user.attachments.isEmpty() || user.missing>0;
+            latest=active=w; app.changed();
+            io.execute(()->run(w.api,w,row,user,text,true)); return true;
         } catch (android.database.sqlite.SQLiteException e) {
             ChatFailure failure=ChatFailure.caught(e,SAVE_REPLY);
             app.log.interrupted(SAVE_REPLY,failure); app.notice(failure.getMessage()); return false;
         }
+    }
+    void interrupt() {
+        Work w=stoppingTarget();
+        if (w==null || w.stopped) return;
+        w.stopped=true; w.cancellation.stop();
+        WebSocket socket=w.socket;
+        if (socket!=null) socket.cancel();
+        app.streamChanged();
     }
     private synchronized boolean track(Work work,String remote) {
         if (active!=work) return false;
@@ -224,8 +353,22 @@ final class ChatEngine {
         ChatFailure failure=null;
         long draft=ContextUsage.estimate(text,files);
         ContextUsage prepared=null;
+        boolean prompting=false;
+        api.cancellation.set(work.cancellation);
         try {
             if (active!=work) return;
+            stage=READ_ATTACHMENT;
+            if (work.batch==null && user.missing>0) work.batch=app.imports.resume(work.chat.id,work.chat.branch,user.id);
+            if (work.batch!=null) {
+                work.preparing=true; app.streamChanged();
+                while (!work.stopped && active==work && !work.batch.done.await(80,TimeUnit.MILLISECONDS)) { }
+                if (active!=work) return;
+                if (!work.stopped && !work.batch.remaining.isEmpty()) throw new ChatFailure("附件读取失败");
+                user=app.history.at(work.chat.branch,user.id); files=user.attachments;
+                draft=ContextUsage.estimate(text,files);
+            }
+            if (work.stopped) throw new ChatFailure("已停止");
+            stage=CREATE_SESSION;
             session=session(api,work,user.id-1,fresh);
             stage=SELECT_MODEL;
             select(api,session,work.model);
@@ -234,7 +377,7 @@ final class ChatEngine {
             prepared=ContextUsage.prepare(api,session,ContextUsage.argument(draft,files));
             draft+=prepared.fileBytes+(long)prepared.documentImages*ContextUsage.DOCUMENT_IMAGE_COST;
             meter(work,prepared);
-            app.changed();
+            app.streamChanged();
             stage=READ_ATTACHMENT;
             int bytes=user.fileBytes<0 ? prepared.fileBytes : Math.min(user.fileBytes,prepared.fileBytes);
             int images=user.imageSlots<0 ? prepared.documentImages : Math.min(user.imageSlots,prepared.documentImages);
@@ -251,14 +394,16 @@ final class ChatEngine {
             if (!"snapshot".equals(snapshot.getString("type"))) throw new ChatFailure("订阅首帧缺少快照");
             ContextUsage opening=ContextUsage.projection(snapshot,prepared.window);
             if (opening!=null && opening.window==prepared.window) {
-                meter(work,opening); app.changed();
+                meter(work,opening); app.streamChanged();
             }
             stage=PROMPT;
             if (active!=work) return;
+            prompting=true;
             JSONObject ack=api.rpc("session/prompt",prompt);
+            work.preparing=false; app.streamChanged();
             if (ack==null || !ack.optBoolean("accepted")) throw new ChatFailure("DSH 未接受消息");
             stage=REPLY;
-            long saved=0;
+            long saved=0,published=0;
             boolean dirty=false;
             String visible="";
             while (!reply.ended) {
@@ -267,16 +412,17 @@ final class ChatEngine {
                 dirty |= reply.accept(feed.next(180,"等待回复事件超时"));
                 if (reply.contextTokens>=0 && reply.contextTokens!=previousCount) {
                     meter(work,new ContextUsage(reply.contextTokens,prepared.window,false));
-                    app.changed();
+                    app.streamChanged();
                 }
                 if (reply.attemptFailure!=null && reply.attemptFailure!=previous) app.log.attemptFailed(reply.attemptFailure);
                 long now=android.os.SystemClock.elapsedRealtime();
-                if (dirty && !reply.ended && (feed.messages.isEmpty() || now-saved>=70)) {
+                if (dirty && !reply.ended && (feed.messages.isEmpty() || now-published>=16)) {
                     String body=reply.body();
                     if (!body.equals(visible)) {
-                        savePartial(work,row,body); app.changed(); visible=body;
+                        work.body=visible=body; app.streamChanged();
+                        if (saved==0 || now-saved>=450) { savePartial(work,row,body); saved=now; }
                     }
-                    dirty=false; saved=now;
+                    dirty=false; published=now;
                 }
             }
             failure=reply.failure;
@@ -287,12 +433,18 @@ final class ChatEngine {
                 failure=stopped;
             }
         } finally {
+            api.cancellation.remove();
             if (socket!=null) socket.close(1000,"");
+            if (work.stopped) failure=new ChatFailure("已停止");
+            work.body=reply.body(); work.preparing=false;
             saveReply(work,row,user.id,session,reply,failure,stage,prepared,draft);
-            app.changed();
-            if (active==work && reply.active() && api==app.api) {
-                try { api.rpc("session/cancel",Wire.request(Wire.obj("sessionId",session))); }
-                catch (Exception ignored) { }
+            work.ended=true; app.streamChanged();
+            if (active==work && (reply.active() || work.stopped && prompting) && api==app.api) {
+                final String cancelSession=session;
+                cleanup.execute(()->{
+                    try { api.rpc("session/cancel",Wire.request(Wire.obj("sessionId",cancelSession))); }
+                    catch (Exception ignored) { }
+                });
             }
             finish(work);
         }
@@ -312,6 +464,7 @@ final class ChatEngine {
                     app.log.add(CHAT_COMPLETE);
                 } else {
                     if (failure==null) failure=new ChatFailure("DSH 回合未结束");
+                    work.error=failure.getMessage();
                     app.log.interrupted(stage,failure);
                     app.history.dirty(work.chat.branch);
                     app.history.update(row,reply.body(),"interrupted",failure.getMessage());
@@ -320,6 +473,8 @@ final class ChatEngine {
             } finally { db.endTransaction(); }
         } catch (android.database.sqlite.SQLiteException e) {
             ChatFailure storage=ChatFailure.caught(e,SAVE_REPLY);
+            work.unsaved=true; work.error=storage.getMessage();
+            if (!outbox.contains(work)) outbox.add(work);
             app.log.interrupted(SAVE_REPLY,storage); app.notice(storage.getMessage());
         }
     }

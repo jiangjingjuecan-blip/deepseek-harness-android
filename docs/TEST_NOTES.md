@@ -1,5 +1,18 @@
 # 安卓安装包验证
 
+## v0.1.7-test
+
+- ARM64 签名 APK 为 **134,368,118 字节（128.14 MiB）**，SHA-256 为 `49709ee28205a7f6f647ba9370238a4929984860cd0b87c563cae459677d12bd`。包名 `com.sunwin.deepseekharness`，versionCode 8，versionName 0.1.7，minSdk 29，targetSdk 34。APK v2 签名和 ZIP 对齐检查通过。与 v0.1.0-test 至 v0.1.6-test 的七份公开包核对，签名证书 SHA-256 均为 `b849e51b4f5a8691ffca6eecbae2592fc28afe06acccc148c52b67f2abc2079e`。[下载 APK](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/download/v0.1.7-test/deepseek-harness-test.apk)
+- 宿主机分别以 `HARNESS_REPLAY=x86_64` 和 `HARNESS_REPLAY=arm64-v8a` 运行发布版测试。两组均为 **61 项通过，0 项跳过**，覆盖逐字显示节拍（8 字/秒、4 秒追赶上限、420 毫秒收尾、即时与轻点补全、替换帧与代理对边界）、发送前置占位与写库/落盘重试、停止取消阻塞 RPC、分支切换与草稿保护、待导入附件恢复、以及既有官方 DSH 0.2.2-rc.2 文游、上下文压缩、SQLite 升级与附件回放。[逐字显示测试](../app/src/test/java/com/sunwin/deepseekharness/TypewriterTest.java) · [发送路径测试](../app/src/test/java/com/sunwin/deepseekharness/SendPathTest.java) · [流式视图测试](../app/src/test/java/com/sunwin/deepseekharness/StreamingViewTest.java)
+- 在 Android 10（API 29）ARM64 模拟器 `harnessarm` 上，先安装 0.1.6 并用 `send-seed-v7` 在 SQLite 7 写入照片、回复、DSH 会话标识与用量，再覆盖安装 0.1.7（升级至 SQLite 8）。设备内 APK 摘要与交付文件一致。`self-check` 通过，核对了应用数据目录 `execve` / 旧硬链接 `EACCES` 与缺失绑定 `BIND_MISMATCH`。
+- 同一安装通过完整界面回归：
+  - `send-ui`（`passed=send-ui`）：验证多行输入与组合输入不误发、待发照片芯片、首次写库失败占位与重试、轻点回复立即补全、上翻锁定与右下角跳回最新、流式中「停止」取消并保留已收正文、默认 **8 字/秒** 逐字展开（2065 ms 内从 3 字展开至 20 字，实测 **8.23 字/秒**）、设置切换「即时」与「8 字/秒」、历史重开直接全文显示、以及重生成逐字展开与版本切换。[发送界面测试](../app/src/androidTest/java/com/sunwin/deepseekharness/DeviceSendUi.java)
+  - `send-bench` 首轮在第 4 回合遇到 Android 10 模拟器 ART JIT 编译线程 SIGSEGV（`libart-compiler.so`）；保留默认 JIT 在新进程重跑得到 `passed=send-bench`，5 轮抬起到气泡绘制 297.5–638.5 ms（中位数 422.6 ms），所有轮次 `insetDelta=0`、`inputDelta=0`、`focus=true`。[发送与显示](SEND_FEEL.md) · [基准采样](../app/src/androidTest/java/com/sunwin/deepseekharness/DeviceSendBench.java)
+  - `adventure-ui`（`passed=adventure-ui`）：读回 0.1.6 升级前数据，验证存档、掷 d20、重生成、版本翻页、编辑用户与 AI 消息及开分支，接收端核对全部 6 次请求。
+  - `delete`（`passed=delete`）：验证历史长按删除取消、删非当前对话、删当前对话打开空对话。
+  - `attachments`、`attachments-reopen` 与 `attachment-pdf` 全部通过：验证 3 张手选/拍照照片、TXT 与 DOCX（2 张内嵌图）、点 `[图 2]` 全屏查看、滑动与缩放、新进程读回附件及升级前旧照片，以及原生 PdfRenderer 与 Office 夹具。
+- 本版测试全部使用本地回环夹具，真实账号模型调用 **0 次**。本轮设备验证仅使用模拟器。[回放入口](../tools/replay.py)
+
 ## v0.1.6-test
 
 - ARM64 签名 APK 为 **134,334,570 字节（128.11 MiB）**，SHA-256 为 `d236bf23b8ade4d8b5454ea720b69bcd1b7e2b7ae725984ff8aa85879c360487`。包名 `com.sunwin.deepseekharness`，versionCode 7，versionName 0.1.6。APK v2 签名和 ZIP 对齐检查通过。与 v0.1.0-test 至 v0.1.5-test 的六份公开包逐个核对，签名证书 SHA-256 均为 `b849e51b4f5a8691ffca6eecbae2592fc28afe06acccc148c52b67f2abc2079e`。[下载 APK](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/download/v0.1.6-test/deepseek-harness-test.apk)

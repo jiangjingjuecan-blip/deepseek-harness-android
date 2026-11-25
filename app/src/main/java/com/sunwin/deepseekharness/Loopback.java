@@ -14,6 +14,13 @@ final class Loopback implements AutoCloseable {
             .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false)
             .connectTimeout(5,TimeUnit.SECONDS).readTimeout(45,TimeUnit.SECONDS)
             .pingInterval(20,TimeUnit.SECONDS).build();
+    static final class Cancellation {
+        private volatile boolean stopped;
+        private volatile Call current;
+        void stop() { stopped=true; Call call=current; if (call!=null) call.cancel(); }
+        void bind(Call call) { current=call; if (stopped) call.cancel(); }
+    }
+    final ThreadLocal<Cancellation> cancellation=new ThreadLocal<>();
     private final Diagnostics log;
     private final OkHttpClient commands=http.newBuilder().readTimeout(5,TimeUnit.MINUTES).build();
     private final Process runtime;
@@ -48,7 +55,10 @@ final class Loopback implements AutoCloseable {
         JSONObject body = Wire.obj("type", "client-request", "rpcId", id, "method", method, "payload", Wire.obj("args",args));
         Request req = local("/api/" + method).header("Connection", "close").post(RequestBody.create(body.toString(), MediaType.get("application/json"))).build();
         OkHttpClient client="commands/execute".equals(method) ? commands : http;
-        try (Response response = client.newCall(req).execute()) {
+        Call call=client.newCall(req);
+        Cancellation scope=cancellation.get();
+        if (scope!=null) scope.bind(call);
+        try (Response response = call.execute()) {
             log.add(method.startsWith("account/") ? HTTP_ACCOUNT : method.endsWith("Catalog") ? HTTP_MODELS : HTTP_CHAT, response.code());
             if (!response.isSuccessful()) {
                 JSONObject error = null;
@@ -62,7 +72,7 @@ final class Loopback implements AutoCloseable {
             }
             if (response.body() == null) throw new ChatFailure("本机 HTTP 响应为空");
             return Wire.rpcValue(id,new JSONObject(response.body().string()));
-        }
+        } finally { if (scope!=null) scope.current=null; }
     }
     WebSocket follow(WebSocketListener listener) throws ChatFailure {
         return http.newWebSocket(local("/api/remote.mux").build(), listener);
