@@ -27,8 +27,10 @@ final class ChatEngine {
         long localUser,localReply,answerUser;
         volatile long user,row;
         volatile boolean started,stopped,ended,preparing,newDraftSaved,unsaved;
-        volatile String body="",error;
+        volatile String body="",error,webStatus="",webError="";
+        volatile List<WebTools.Source> sources=Collections.emptyList();
         volatile ContextUsage usage;
+        boolean webSearch;
         String text="";
         List<Attachment> files=Collections.emptyList();
         DraftImporter.Batch batch;
@@ -40,7 +42,8 @@ final class ChatEngine {
             for (Attachment f:batch.ready) if (ids.add(f.id)) result.add(f);
             return result;
         }
-        Work(History.Chat chat,String model) { this.chat=chat; this.model=model; }
+        Work(History.Chat chat,String model) { this(chat,model,WebTools.DEFAULT_ENABLED); }
+        Work(History.Chat chat,String model,boolean webSearch) { this.chat=chat; this.model=model; this.webSearch=webSearch; }
     }
     ChatEngine(HarnessApp app,String cwd) { this.app=app; this.cwd=cwd; }
     boolean busy() { return active!=null; }
@@ -105,11 +108,15 @@ final class ChatEngine {
     void savingDraft(long branch) {
         for (Work w:outbox) if (w.chat.branch==branch) w.newDraftSaved=true;
     }
+    private String turnModel(boolean webSearch) {
+        return WebTools.effectiveModel(app.account.selected,app.account.models,webSearch);
+    }
     synchronized Work reserve(History.Chat chat,String text,List<Attachment> files,DraftImporter.Batch batch,
                               long answerUser,boolean dice) {
         if (busy() || Attachment.photos(files)>Attachment.MAX_PHOTOS || Attachment.documents(files)>Attachment.MAX_DOCUMENTS ||
                 (text.isEmpty() && files.isEmpty() && batch==null && !dice && answerUser==0)) return null;
-        Work w=new Work(chat,app.account.selected);
+        boolean search=app.webSearchEnabled();
+        Work w=new Work(chat,turnModel(search),search);
         w.api=app.api; w.text=text; w.files=new ArrayList<>(files); w.batch=batch; w.answerUser=answerUser;
         if (batch!=null) batch.claimed=true;
         w.preparing=!files.isEmpty() || batch!=null;
@@ -166,7 +173,8 @@ final class ChatEngine {
     }
     synchronized boolean retryLocal(Work w) {
         if (!ready() || !outbox.contains(w) || !w.ended) return false;
-        w.api=app.api; w.model=app.account.selected; w.cancellation=new Loopback.Cancellation(); w.error=null; w.ended=false; w.stopped=false; w.started=false;
+        w.webSearch=app.webSearchEnabled();
+        w.api=app.api; w.model=turnModel(w.webSearch); w.cancellation=new Loopback.Cancellation(); w.error=null; w.webStatus=""; w.webError=""; w.sources=Collections.emptyList(); w.ended=false; w.stopped=false; w.started=false;
         w.preparing=w.batch!=null || !w.files.isEmpty();
         if (w.batch!=null) app.imports.retry(w.batch);
         active=latest=w; start(w); app.changed(); return true;
@@ -203,7 +211,8 @@ final class ChatEngine {
             android.database.sqlite.SQLiteDatabase db=app.history.getWritableDatabase(); db.beginTransaction();
             try {
                 row=insert.getAsLong();
-                w=new Work(app.history.chat(chatId),app.account.selected);
+                boolean search=app.webSearchEnabled();
+                w=new Work(app.history.chat(chatId),turnModel(search),search);
                 user=app.history.at(w.chat.branch,app.history.last(w.chat.branch,row));
                 text=app.history.promptText(w.chat.branch,user);
                 db.setTransactionSuccessful();
@@ -305,7 +314,12 @@ final class ChatEngine {
             JSONArray parts=Wire.parts(app,body,m.attachments,m.fileBytes<0 ? ContextUsage.MAX_FILE_BYTES : m.fileBytes,
                     m.imageSlots<0 ? Attachment.documentImageSlots(m.attachments) : m.imageSlots,true);
             if (parts.length()==0) continue; // Empty interrupted reply has no model-visible content.
-            JSONObject value=api.rpc("commands/execute",Wire.obj("agentId",remote,"line","/phone-restore "+Wire.obj("role",m.role,"content",parts),
+            JSONObject payload=Wire.obj("role",m.role,"content",parts);
+            if ("assistant".equals(m.role) && m.webBlocks!=null && !m.webBlocks.isEmpty()) {
+                try { payload.put("webBlocks",new JSONArray(m.webBlocks)); }
+                catch (JSONException ignored) { }
+            }
+            JSONObject value=api.rpc("commands/execute",Wire.obj("agentId",remote,"line","/phone-restore "+payload,
                     "submittedAttachments",new JSONArray()));
             JSONObject result=value==null ? null : value.optJSONObject("result");
             if (result==null || !"success".equals(result.optString("kind")) || !result.optString("text").matches("[0-9]{1,15}"))
@@ -354,6 +368,8 @@ final class ChatEngine {
         long draft=ContextUsage.estimate(text,files);
         ContextUsage prepared=null;
         boolean prompting=false;
+        int completedBefore=app.history.completedTurns(work.chat.branch);
+        boolean wantTitle=ChatTitle.shouldRequest(work.chat,completedBefore);
         api.cancellation.set(work.cancellation);
         try {
             if (active!=work) return;
@@ -372,6 +388,10 @@ final class ChatEngine {
             session=session(api,work,user.id-1,fresh);
             stage=SELECT_MODEL;
             select(api,session,work.model);
+            String webMode=WebTools.mode(work.model,work.webSearch);
+            boolean inlineTitle=wantTitle && WebTools.FLASH_MODEL.equals(work.model);
+            api.rpc("commands/execute",Wire.obj("agentId",session,"line","/phone-web "+Wire.obj("mode",webMode,"title",inlineTitle),
+                    "submittedAttachments",new JSONArray()));
             stage=CONTEXT;
             if (active!=work) return;
             prepared=ContextUsage.prepare(api,session,ContextUsage.argument(draft,files));
@@ -418,10 +438,16 @@ final class ChatEngine {
                 long now=android.os.SystemClock.elapsedRealtime();
                 if (dirty && !reply.ended && (feed.messages.isEmpty() || now-published>=16)) {
                     String body=reply.body();
+                    String status=reply.webStatus;
+                    List<WebTools.Source> sources=reply.sources();
+                    boolean uiDirty=!body.equals(visible) || !status.equals(work.webStatus)
+                            || sources.size()!=work.sources.size() || !reply.webError.equals(work.webError);
                     if (!body.equals(visible)) {
-                        work.body=visible=body; app.streamChanged();
+                        work.body=visible=body;
                         if (saved==0 || now-saved>=450) { savePartial(work,row,body); saved=now; }
                     }
+                    work.webStatus=status; work.sources=sources; work.webError=reply.webError;
+                    if (uiDirty) app.streamChanged();
                     dirty=false; published=now;
                 }
             }
@@ -436,8 +462,8 @@ final class ChatEngine {
             api.cancellation.remove();
             if (socket!=null) socket.close(1000,"");
             if (work.stopped) failure=new ChatFailure("已停止");
-            work.body=reply.body(); work.preparing=false;
-            saveReply(work,row,user.id,session,reply,failure,stage,prepared,draft);
+            work.body=reply.body(); work.webStatus=""; work.sources=reply.sources(); work.webError=reply.webError; work.preparing=false;
+            boolean needFallbackTitle=saveReply(work,row,user.id,session,reply,failure,stage,prepared,draft,wantTitle,completedBefore);
             work.ended=true; app.streamChanged();
             if (active==work && (reply.active() || work.stopped && prompting) && api==app.api) {
                 final String cancelSession=session;
@@ -447,18 +473,46 @@ final class ChatEngine {
                 });
             }
             finish(work);
+            if (needFallbackTitle && session!=null && api==app.api && app.account.models.contains(WebTools.FLASH_MODEL)) {
+                scheduleFallbackTitle(api,session,work.chat.id,completedBefore+1);
+            }
         }
     }
-    private synchronized void saveReply(Work work,long row,long user,String session,Reply reply,ChatFailure failure,
-                                        ChatFailure.Stage stage,ContextUsage prepared,long draft) {
-        if (active!=work) return;
+    private void scheduleFallbackTitle(Loopback api,String session,long chatId,int turns) {
+        String transcript=ChatTitle.transcript(app.history.messages(chatId));
+        if (transcript.isEmpty()) return;
+        cleanup.execute(()->{
+            try {
+                if (api!=app.api) return;
+                JSONObject res=api.rpc("commands/execute",Wire.obj("agentId",session,
+                        "line","/phone-title "+Wire.obj("transcript",transcript),
+                        "submittedAttachments",new JSONArray()));
+                JSONObject result=res==null ? null : res.optJSONObject("result");
+                if (result!=null && "success".equals(result.optString("kind"))) {
+                    String clean=ChatTitle.sanitize(result.optString("text",""));
+                    if (!clean.isEmpty()) {
+                        app.history.setAiTitle(chatId,clean,turns);
+                        app.changed();
+                    }
+                }
+            } catch (Exception ignored) { }
+        });
+    }
+    private synchronized boolean saveReply(Work work,long row,long user,String session,Reply reply,ChatFailure failure,
+                                           ChatFailure.Stage stage,ContextUsage prepared,long draft,
+                                           boolean wantTitle,int completedBefore) {
+        if (active!=work) return false;
+        boolean needFallbackTitle=false;
         try {
             android.database.sqlite.SQLiteDatabase db=app.history.getWritableDatabase(); db.beginTransaction();
             try {
                 if (session!=null) anchor(work,user,session,reply.userSeq);
                 if (failure==null && reply.completed) {
                     anchor(work,row,session,reply.endSeq);
-                    app.history.update(row,reply.body(),"done");
+                    String toolErr=reply.webError.isEmpty() ? null : reply.webError;
+                    app.history.update(row,reply.body(),"done",toolErr,reply.webBlocksJson,reply.citationsJson);
+                    if (!reply.title.isEmpty()) app.history.setAiTitle(work.chat.id,reply.title,completedBefore+1);
+                    else if (wantTitle && !WebTools.FLASH_MODEL.equals(work.model)) needFallbackTitle=true;
                     if (reply.contextTokens<0 && prepared!=null) meter(work,
                             new ContextUsage(prepared.used+draft+ContextUsage.estimate(reply.body(),Collections.emptyList()),prepared.window,false));
                     app.log.add(CHAT_COMPLETE);
@@ -467,7 +521,7 @@ final class ChatEngine {
                     work.error=failure.getMessage();
                     app.log.interrupted(stage,failure);
                     app.history.dirty(work.chat.branch);
-                    app.history.update(row,reply.body(),"interrupted",failure.getMessage());
+                    app.history.update(row,reply.body(),"interrupted",failure.getMessage(),reply.webBlocksJson,reply.citationsJson);
                 }
                 db.setTransactionSuccessful();
             } finally { db.endTransaction(); }
@@ -477,6 +531,7 @@ final class ChatEngine {
             if (!outbox.contains(work)) outbox.add(work);
             app.log.interrupted(SAVE_REPLY,storage); app.notice(storage.getMessage());
         }
+        return needFallbackTitle;
     }
     private static final class Frame {
         final String json;

@@ -33,8 +33,8 @@ public final class DeviceSmoke extends Instrumentation {
         try {
             if (!"ranchu".equals(Build.HARDWARE) && !Build.HARDWARE.contains("goldfish")) throw new AssertionError();
             String mode=options.getString("scenario","history");
-            if ("attachment-seed-v4".equals(mode) || "attachment-seed-v5".equals(mode) || "adventure-seed-v6".equals(mode) || "send-seed-v7".equals(mode)) {
-                stage=mode; seedOldPhoto(mode.endsWith("v4") ? 4 : mode.endsWith("v5") ? 5 : mode.endsWith("v6") ? 6 : 7);
+            if ("attachment-seed-v4".equals(mode) || "attachment-seed-v5".equals(mode) || "adventure-seed-v6".equals(mode) || "send-seed-v7".equals(mode) || "web-seed-v8".equals(mode)) {
+                stage=mode; seedOldPhoto(mode.endsWith("v4") ? 4 : mode.endsWith("v5") ? 5 : mode.endsWith("v6") ? 6 : mode.endsWith("v7") ? 7 : 8);
                 result.putString("passed",mode); finish(Activity.RESULT_OK,result); return;
             }
             if ("attachment-pdf".equals(mode)) {
@@ -70,7 +70,7 @@ public final class DeviceSmoke extends Instrumentation {
             }
             activity=(MainActivity)startActivitySync(new Intent(getTargetContext(),MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             app=(HarnessApp)activity.getApplication();
-            if ("context".equals(mode) || "attachments".equals(mode) || "adventure-ui".equals(mode) || "send-bench".equals(mode) || "send-ui".equals(mode)) {
+            if ("context".equals(mode) || "attachments".equals(mode) || "adventure-ui".equals(mode) || "send-bench".equals(mode) || "send-ui".equals(mode) || "web-ui".equals(mode)) {
                 DeviceContext test=new DeviceContext(this,activity);
                 try { test.run(Integer.parseInt(options.getString("fixturePort")),mode,result); }
                 finally { stage=test.stage; }

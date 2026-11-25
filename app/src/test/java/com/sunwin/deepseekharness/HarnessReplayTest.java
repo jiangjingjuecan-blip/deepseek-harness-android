@@ -194,13 +194,18 @@ public class HarnessReplayTest {
         assertEquals(2,doc.imageCount());
         for (String picture:doc.imagePaths()) assertTrue(Attachment.file(app,picture).length()>0);
         long routes=app.history.create();
-        for (String model:new String[]{"fixture-future","deepseek-v4-pro"}) {
-            app.account.selected=model;
-            assertTrue(chat.send(routes,"fixture-future".equals(model) ? "测试新模型" : "核对恢复",Collections.emptyList()));
-            await("routed output cap",()->!chat.busy());
-            java.util.List<History.Message> rows=app.history.messages(routes);
-            History.Message answer=rows.get(rows.size()-1);
-            assertEquals(model+" "+answer.error,"done",answer.state);
+        app.webSearchEnabled(false);
+        try {
+            for (String model:new String[]{"fixture-future","deepseek-v4-pro"}) {
+                app.account.selected=model;
+                assertTrue(chat.send(routes,"fixture-future".equals(model) ? "测试新模型" : "核对恢复",Collections.emptyList()));
+                await("routed output cap",()->!chat.busy());
+                java.util.List<History.Message> rows=app.history.messages(routes);
+                History.Message answer=rows.get(rows.size()-1);
+                assertEquals(model+" "+answer.error,"done",answer.state);
+            }
+        } finally {
+            app.webSearchEnabled(true);
         }
     }
     private static void await(String label,BooleanSupplier condition) throws InterruptedException {

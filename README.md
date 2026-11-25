@@ -12,13 +12,15 @@ DeepSeek 助手是一款 Android 聊天客户端。它通过 PRoot 在手机上�
 
 长按任意消息可以存档或分支。回复支持重生成、编辑和版本切换。输入框的「骰子」在本机掷骰，下次发送时会把点数交给模型判定。[文游操作与存储](docs/ADVENTURE.md)
 
+输入框的地球图标默认开启「联网搜索」，可由 DeepSeek 服务端联网搜索或读取你粘贴的链接；关闭时仍支持读取粘贴链接，搜索与网页阅读进度以紧凑标签展示，引用来源可在回复下方点击打开。助手回复支持本机离线 Markdown（标题、加粗、列表、表格、横向滚动代码块等）与 LaTeX 数学公式渲染（行内与块级公式，宽公式支持横向滚动，长按复制保留原始源码）。首轮回复后自动生成简洁对话标题并在第三轮按需更新，点顶栏标题可手动重命名。
+
 ## 安装测试版
 
 适用于 Android 10 及以上、支持 `arm64-v8a` 的手机。
 
-1. 在项目的 GitHub Release 中找到 `v0.1.7-test`，下载附件 `deepseek-harness-test.apk`。[发布页](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/tag/v0.1.7-test) · [下载 APK](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/download/v0.1.7-test/deepseek-harness-test.apk)
-2. 核对文件大小 **134,368,118 字节（128.14 MiB）**。在电脑上可运行 `sha256sum deepseek-harness-test.apk`，预期 SHA-256 为 `49709ee28205a7f6f647ba9370238a4929984860cd0b87c563cae459677d12bd`。
-3. 在手机上点开 APK 安装。已安装此前 v0.1.0-test 至 v0.1.6-test 的手机可覆盖安装，保留本地对话。如果系统询问，允许当前浏览器或文件管理器安装此应用。
+1. 在项目的 GitHub Release 中找到 `v0.1.8-test`，下载附件 `deepseek-harness-test.apk`。[发布页](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/tag/v0.1.8-test) · [下载 APK](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/download/v0.1.8-test/deepseek-harness-test.apk)
+2. 核对文件大小 **135,200,002 字节（128.94 MiB）**。在电脑上可运行 `sha256sum deepseek-harness-test.apk`，预期 SHA-256 为 `1eecfac65d89e1373ae3651637ddd04353f20e1e569b10045979bba97772968c`。
+3. 在手机上点开 APK 安装。已安装此前 v0.1.0-test 至 v0.1.7-test 的手机可覆盖安装，保留本地对话。如果系统询问，允许当前浏览器或文件管理器安装此应用。
 
 ## 在手机上试用
 

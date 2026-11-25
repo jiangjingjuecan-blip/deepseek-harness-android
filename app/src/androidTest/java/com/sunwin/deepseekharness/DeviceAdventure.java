@@ -23,7 +23,7 @@ final class DeviceAdventure {
     void run() throws Exception {
         long old=activity.getSharedPreferences("ui",0).getLong("adventure-upgrade",0);
         History.Chat migrated=app.history.chat(old);
-        require(migrated!=null && ("fixture-upgrade-v6".equals(migrated.remote) || "fixture-upgrade-v7".equals(migrated.remote)));
+        require(migrated!=null && ("fixture-upgrade-v6".equals(migrated.remote) || "fixture-upgrade-v7".equals(migrated.remote) || "fixture-upgrade-v8".equals(migrated.remote)));
         require(app.history.branches(old).size()==1 && app.history.meter(old,"deepseek-flash").used==66);
         List<History.Message> rows=app.history.messages(old);
         require(rows.size()==2 && "升级前回复".equals(rows.get(1).text));

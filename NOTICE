@@ -78,6 +78,16 @@ Android 客户端和构建工具
   assets/licenses/PdfBox-Android-NOTICE.txt 和 PdfBox-Android-LICENSE.txt。
   https://github.com/TomRoush/PdfBox-Android/tree/v2.0.27.0
 
+  Markwon 4.6.2（core、ext-strikethrough）使用 Apache-2.0，其依赖
+  commonmark-java 0.13.0 使用 BSD 二条款。
+  https://github.com/noties/Markwon
+  https://github.com/commonmark/commonmark-java
+
+  JLatexMath-Android 0.2.0 提供离线 LaTeX 数学公式排版，基于 Scilab JLaTeXMath，
+  使用 GPL-2.0（含上游字体与类路径例外）。GPL-2 许可全文随 APK 保存在
+  assets/licenses/GPL-2。
+  https://github.com/noties/jlatexmath-android
+
   Gradle Wrapper 8.9 的启动脚本和 JAR 使用 Apache-2.0。脚本保留原版权头，
   完整许可位于 gradle/wrapper/gradle-wrapper.jar 中的 META-INF/LICENSE。
   Android Gradle Plugin 8.7.3 使用 Apache-2.0。

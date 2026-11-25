@@ -27,3 +27,5 @@
 `v0.1.6-test` 基于公开提交 `f9d39d1` 快进。发布审计逐个检查公开历史可达的路径、文件大小和凭据特征，并检查 Office 测试夹具的内部条目。签名 APK 与 0.1.5 最终包的条目集合相同，30 个 ARM64 原生库逐个字节一致。包内手机预设和分支恢复脚本与本次源码一致。完整 APK 随 GitHub 预发布附件分发。[签名与测试记录](TEST_NOTES.md)
 
 `v0.1.7-test` 基于公开提交 `0bfdc4c` 快进。发布审计逐个检查公开历史可达的路径、文件大小、二进制文件与凭据特征，排除 `.signing/`、`dist-apk/`、`docs/CODEX_BRIEF*.md` 与 `docs/briefs/`，并检查 Office 测试夹具的内部条目。签名 APK 相对 0.1.6 仅新增停止图标资源 XML 及对应应用 DEX/资源变更，30 个 ARM64 原生库逐个字节一致，包内手机预设与分支恢复脚本与本次源码一致。完整 APK 随 GitHub 预发布附件分发。[签名与测试记录](TEST_NOTES.md)
+
+`v0.1.8-test` 基于公开提交 `d52737e` 快进。发布审计逐个检查公开历史可达的路径、文件大小、二进制文件与凭据特征，排除 `.signing/`、`dist-apk/`、`docs/CODEX_BRIEF*.md` 与 `docs/briefs/`。新增依赖 Markwon、commonmark-java 与 JLatexMath-Android 的许可与署名已更新至 `NOTICE`（JLatexMath 采用带 Classpath 例外的 GPL-2.0，随 APK 已有 `assets/licenses/GPL-2` 分发）。签名 APK 相对 0.1.7 新增 79 个条目（联网地球图标 `res/WA.xml`、`commonmark` 实体表及 77 个 JLatexMath 离线公式字体与描述资源），0 个移除，30 个 ARM64 原生库逐个字节一致，包内 `assets/chat.yml` 与 `assets/phone-context.cjs` 与本次源码逐字节一致。完整 APK 随 GitHub 预发布附件分发。[签名与测试记录](TEST_NOTES.md)

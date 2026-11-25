@@ -15,7 +15,7 @@ final class ChatFailure extends IOException {
             "CLIENT_UPGRADE_REQUIRED UNKNOWN_MODEL MODEL_UNSUPPORTED RATE_LIMIT TIMEOUT TRANSPORT SERVER STREAM_CLOSED " +
             "EMPTY_RESPONSE INVALID_REQUEST INVALID_RESPONSE MALFORMED_RESPONSE UNSUPPORTED_CONTENT FILES_API " +
             "DISCOVERY_FAILED INVALID_CONFIG INVALID_MODEL_CONTEXT INVALID_MODEL_INFO NO_ADAPTER " +
-            "CONTEXT_WINDOW_EXCEEDED IMAGE_OFFLOAD_REQUIRED ABORTED TOOL_ACTIVATION_FAILED UNKNOWN " +
+            "CONTEXT_WINDOW_EXCEEDED IMAGE_OFFLOAD_REQUIRED ABORTED TOOL_ACTIVATION_FAILED UNKNOWN CONTENT_REFUSAL " +
             "gateway/bad-request gateway/internal gateway/forbidden gateway/not-found gateway/method-unavailable " +
             "gateway/arguments-invalid gateway/input-invalid gateway/result-invalid gateway/binding-invalid gateway/signature-invalid " +
             "gateway/peer-disposed gateway/cancelled gateway/context-not-found session/conflict session/agent-busy " +
@@ -59,9 +59,10 @@ final class ChatFailure extends IOException {
             for (String system : SYSTEM_CODES) {
                 if (message.contains(system)) { note = system; break; }
             }
-            if (note.isEmpty() && (code.isEmpty() || "UNKNOWN".equals(code) || "gateway/internal".equals(code))) {
+            if (note.isEmpty() && (code.isEmpty() || "UNKNOWN".equals(code) || "gateway/internal".equals(code) || "INVALID_REQUEST".equals(code))) {
                 String detail = message.toLowerCase(Locale.ROOT);
-                if (detail.contains("insufficient balance") || detail.contains("insufficient quota")) note = "账号额度不足";
+                if (detail.contains("content exists risk")) note = "内容安全未通过";
+                else if (detail.contains("insufficient balance") || detail.contains("insufficient quota")) note = "账号额度不足";
                 else if (detail.contains("permission denied")) note = "访问被拒绝";
                 else if (detail.contains("fetch failed")) note = "网络请求失败";
                 else if (detail.contains("timed out")) note = "请求超时";
@@ -70,6 +71,7 @@ final class ChatFailure extends IOException {
         String label;
         switch (code) {
             case "QUOTA": case "ACCOUNT_QUOTA": label = "账号额度不足"; break;
+            case "CONTENT_REFUSAL": label = "内容安全未通过"; break;
             case "AUTH": case "ACCOUNT_TOKEN_INVALID": case "INVALID_CREDENTIAL": label = "账号鉴权失败"; break;
             case "ACCOUNT_SIGN_IN_REQUIRED": case "MISSING_CREDENTIAL": label = "账号未登录"; break;
             case "MODEL_UNSUPPORTED": case "UNKNOWN_MODEL": case "session/model-unavailable": label = "模型不可用"; break;

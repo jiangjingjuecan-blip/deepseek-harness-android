@@ -148,7 +148,7 @@ public class AttachmentTest {
             db.execSQL("INSERT INTO chat VALUES(11,'旧图','fixture-session',100)");
             db.execSQL("INSERT INTO message VALUES(42,11,'user','图',?,'done',NULL)",new Object[]{old.toString()}); db.setVersion(4);
         }
-        try (History db=new History(ctx)) { assertEquals(8,db.getReadableDatabase().getVersion()); }
+        try (History db=new History(ctx)) { assertEquals(9,db.getReadableDatabase().getVersion()); }
         try (History db=new History(ctx)) {
             History.Message message=db.messages(11).get(0);
             assertEquals(42,message.id); assertEquals("fixture-session",db.chat(11).remote); assertEquals(1,message.attachments.size());

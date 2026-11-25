@@ -28,6 +28,7 @@ public final class MainActivity extends Activity {
     private static final int PICK=20, CAMERA=21, EXPORT=22, DOCUMENT=23, NOTIFICATIONS=24;
     private HarnessApp app;
     private Appearance a;
+    private RichMarkdown rich;
     private final ExecutorService files=Executors.newSingleThreadExecutor();
     private final ExecutorService thumbnails=Executors.newSingleThreadExecutor();
     private final android.util.LruCache<String,Bitmap> thumbs=new android.util.LruCache<String,Bitmap>(4*1024*1024) {
@@ -50,14 +51,14 @@ public final class MainActivity extends Activity {
     private final Set<ChatEngine.Work> adoptions=new LinkedHashSet<>();
     private TextView header, subtitle, meter, branchButton;
     private EditText input;
-    private ImageButton send;
+    private ImageButton send, webToggle;
     private final HashMap<Long,Bubble> bubbles=new HashMap<>();
     private String introKey="";
     private android.content.SharedPreferences preferences() { return getSharedPreferences("ui",MODE_PRIVATE); }
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        app=(HarnessApp)getApplication(); a=new Appearance(this);
+        app=(HarnessApp)getApplication(); a=new Appearance(this); rich=new RichMarkdown(this,a,this::openExternal);
         chatId=preferences().getLong("chat",0);
         if (app.history.chat(chatId)==null) {
             List<History.Chat> items=app.history.list();
@@ -126,7 +127,7 @@ public final class MainActivity extends Activity {
             saveDraft(); draftBranch=selected; draft=app.history.textDraft(selected);
         }
         if (generating!=null && generating.chat.branch==selected) watch(generating);
-        input=null; send=null; stopIcon=false; introKey=""; bubbles.clear();
+        input=null; send=null; webToggle=null; stopIcon=false; introKey=""; bubbles.clear();
         root=a.column(); root.setBackgroundColor(PAPER); root.setFocusableInTouchMode(true);
         setContentView(root);
         boolean chat="chat".equals(screen);
@@ -135,6 +136,7 @@ public final class MainActivity extends Activity {
         LinearLayout titles=a.column(); titles.setGravity(Gravity.CENTER_VERTICAL); a.pad(titles,6,0);
         header=a.text("",18,INK,true); header.setSingleLine(true); header.setEllipsize(TextUtils.TruncateAt.END);
         titles.addView(header); subtitle=a.text("",12,DIM,false); titles.addView(subtitle);
+        if (chat) titles.setOnClickListener(v->renameChat());
         bar.addView(titles,new LinearLayout.LayoutParams(0,-1,1));
         if (chat) {
             branchButton=a.button("分支",false,this::showBranches); a.buttonStyle(branchButton,PAPER,14);
@@ -174,7 +176,7 @@ public final class MainActivity extends Activity {
                 Loopback api=app.api;
                 subtitle.setText(api!=null && app.account.stored ? app.account.modelStatus(api) : status());
                 subtitle.setVisibility(View.VISIBLE);
-                renderMessages(); drawAttachment(); updateSend();
+                renderMessages(); drawAttachment(); styleWebToggle(); updateSend();
         }
     }
     private String status() {
@@ -225,11 +227,14 @@ public final class MainActivity extends Activity {
         });
         LinearLayout tools=a.row(); composer.addView(tools);
         ImageButton gallery=a.icon(R.drawable.ic_gallery,"相册",this::gallery), camera=a.icon(R.drawable.ic_camera,"拍照",this::camera);
-        for (ImageButton b:new ImageButton[]{gallery,camera}) { a.buttonStyle(b,WHITE,12); tools.addView(b,a.size(48,48)); }
+        for (ImageButton b:new ImageButton[]{gallery,camera}) { a.buttonStyle(b,WHITE,12); tools.addView(b,a.size(44,48)); }
         TextView file=a.button("文件",false,this::documents);
-        a.buttonStyle(file,WHITE,12); a.pad(file,6,0); tools.addView(file,a.size(48,48));
+        a.buttonStyle(file,WHITE,12); a.pad(file,4,0); tools.addView(file,a.size(44,48));
         TextView dice=a.button("骰子",false,this::diceMenu); a.buttonStyle(dice,WHITE,12); a.pad(dice,2,0);
-        tools.addView(dice,a.size(44,48));
+        tools.addView(dice,a.size(42,48));
+        webToggle=a.icon(R.drawable.ic_web,"联网搜索",this::toggleWebSearch);
+        tools.addView(webToggle,a.size(44,48));
+        styleWebToggle();
         tools.addView(new View(this),new LinearLayout.LayoutParams(0,1,1));
         send=a.icon(R.drawable.ic_send,"发送",this::send); a.buttonStyle(send,BLUE,15); send.setColorFilter(WHITE);
         android.animation.StateListAnimator press=new android.animation.StateListAnimator();
@@ -283,13 +288,21 @@ public final class MainActivity extends Activity {
             if ("user".equals(m.role)) { user=bubble; user.retry(null,0); user.progress(false,m.missing,m.documents); }
             if (user!=null && "assistant".equals(m.role) && "interrupted".equals(m.state) && !"已停止".equals(m.error))
                 user.retry(null,m.id);
-            if (live==null || m.id!=live.row) body(bubble,m.text,m.state,m.error);
-            else if (bubble.text.length()==0) body(bubble,"","pending",null);
+            if (live==null || m.id!=live.row) {
+                bubble.webStatus("");
+                bubble.sources(m.sources);
+                body(bubble,m.text,m.state,m.error);
+            } else if (bubble.text.length()==0 && (bubble.richBox==null || bubble.richBox.getChildCount()==0)) {
+                bubble.webStatus(live.ended ? "" : live.webStatus);
+                bubble.sources(live.sources);
+                body(bubble,"","pending",null);
+            }
         }
         for (ChatEngine.Work w:outgoing) {
             if (w.row==0) optimistic(w);
             else if (w.unsaved && bubbles.containsKey(w.row) && bubbles.containsKey(w.user)) {
-                body(bubbles.get(w.row),w.body,"interrupted",w.error); bubbles.get(w.user).retry(null,w.row);
+                Bubble ans=bubbles.get(w.row); ans.webStatus(""); ans.sources(w.sources);
+                body(ans,w.body,"interrupted",w.error); bubbles.get(w.user).retry(null,w.row);
             }
         }
         if (live!=null) scheduleFrame();
@@ -303,17 +316,22 @@ public final class MainActivity extends Activity {
         }
     }
     private final class Bubble {
-        long id,retryId;
+        long id,retryId,lastRichAt;
         History.Message metadata;
         final LinearLayout group=a.column(),actions=a.row();
         final TextView text;
-        LinearLayout fileBox;
-        TextView retry,placeholder;
+        final View.OnClickListener tap;
+        final View.OnLongClickListener hold;
+        LinearLayout fileBox,webStatusChip,richBox,sourceRow;
+        HorizontalScrollView sourceScroll;
+        TextView retry,placeholder,webStatusText,errorNote;
         ProgressBar progress;
         ChatEngine.Work localRetry;
         Typewriter painted;
         int revision;
+        String richRendered;
         List<Attachment> files=Collections.emptyList();
+        List<WebTools.Source> shownSources=Collections.emptyList();
         Bubble(History.Message m) {
             id=m.id;
             boolean user="user".equals(m.role),dice="dice".equals(m.role);
@@ -322,16 +340,80 @@ public final class MainActivity extends Activity {
             if (user) gp.leftMargin=a.dp(34); else gp.rightMargin=a.dp(18);
             thread.addView(group,gp); group.addView(actions,a.size(-2,-2));
             text=a.text("",16,INK,false); text.setTextIsSelectable(true);
-            View.OnLongClickListener hold=v->{ if (id>0) messageMenu(id); return true; };
+            hold=v->{ if (id>0) messageMenu(id); return true; };
+            tap=v->{ if (live!=null && isReply(this)) { writer.finish(); paintLive(); } };
             group.setOnLongClickListener(hold); text.setOnLongClickListener(hold);
             if (user || dice) { text.setBackground(a.shape(PALE,17,0)); a.pad(text,14,11); }
             else {
-                a.pad(text,0,3); text.setOnClickListener(v->{
-                    if (live!=null && isReply(this)) { writer.finish(); paintLive(); }
-                });
-                group.setOnClickListener(v->text.performClick());
+                a.pad(text,0,3); text.setOnClickListener(tap);
+                group.setOnClickListener(tap);
+                webStatusChip=a.row();
+                webStatusChip.setBackground(a.shape(PALE,12,0));
+                a.pad(webStatusChip,9,5);
+                ImageView globe=new ImageView(MainActivity.this);
+                globe.setImageResource(R.drawable.ic_web); globe.setColorFilter(BLUE);
+                LinearLayout.LayoutParams glp=a.size(14,14); glp.rightMargin=a.dp(5);
+                webStatusChip.addView(globe,glp);
+                webStatusText=a.text("",12,BLUE,false);
+                webStatusText.setSingleLine(true); webStatusText.setEllipsize(TextUtils.TruncateAt.END);
+                webStatusChip.addView(webStatusText,a.size(-2,-2));
+                webStatusChip.setVisibility(View.GONE);
+                LinearLayout.LayoutParams wlp=a.size(-2,-2); wlp.topMargin=a.dp(2); wlp.bottomMargin=a.dp(4);
+                group.addView(webStatusChip,wlp);
             }
             group.addView(text,a.size(-2,-2));
+            if (!user && !dice) {
+                richBox=a.column();
+                richBox.setVisibility(View.GONE);
+                richBox.setOnClickListener(tap); richBox.setOnLongClickListener(hold);
+                group.addView(richBox,a.size(-1,-2));
+                errorNote=a.text("",15,DIM,false);
+                errorNote.setVisibility(View.GONE);
+                LinearLayout.LayoutParams elp=a.size(-2,-2); elp.topMargin=a.dp(4);
+                group.addView(errorNote,elp);
+                sourceScroll=new HorizontalScrollView(MainActivity.this);
+                sourceScroll.setHorizontalScrollBarEnabled(false);
+                sourceScroll.setVisibility(View.GONE);
+                sourceRow=a.row();
+                sourceScroll.addView(sourceRow,new FrameLayout.LayoutParams(-2,-2));
+                LinearLayout.LayoutParams slp=a.size(-1,-2); slp.topMargin=a.dp(8);
+                group.addView(sourceScroll,slp);
+            }
+        }
+        void webStatus(String status) {
+            if (webStatusChip==null) return;
+            boolean show=status!=null && !status.isEmpty();
+            webStatusChip.setVisibility(show?View.VISIBLE:View.GONE);
+            if (show && !TextUtils.equals(status,webStatusText.getText())) webStatusText.setText(status);
+        }
+        void sources(List<WebTools.Source> list) {
+            if (sourceScroll==null) return;
+            List<WebTools.Source> safe=list==null ? Collections.emptyList() : list;
+            if (safe.equals(shownSources)) return;
+            shownSources=new ArrayList<>(safe);
+            sourceRow.removeAllViews();
+            if (shownSources.isEmpty()) { sourceScroll.setVisibility(View.GONE); return; }
+            for (int i=0;i<shownSources.size();i++) {
+                WebTools.Source s=shownSources.get(i);
+                LinearLayout chip=a.row();
+                a.pad(chip,9,5);
+                chip.setBackground(a.shape(WHITE,11,LINE));
+                ImageView icon=new ImageView(MainActivity.this);
+                icon.setImageResource(R.drawable.ic_web); icon.setColorFilter(BLUE);
+                LinearLayout.LayoutParams ilp=a.size(12,12); ilp.rightMargin=a.dp(4);
+                chip.addView(icon,ilp);
+                String label=s.label();
+                TextView tv=a.text(label,12,BLUE,false);
+                tv.setSingleLine(true); tv.setMaxWidth(a.dp(170)); tv.setEllipsize(TextUtils.TruncateAt.END);
+                chip.addView(tv,a.size(-2,-2));
+                chip.setContentDescription("来源："+label);
+                chip.setClickable(true);
+                chip.setOnClickListener(v->openExternal(Uri.parse(s.url)));
+                LinearLayout.LayoutParams clp=a.size(-2,-2);
+                if (i>0) clp.leftMargin=a.dp(6);
+                sourceRow.addView(chip,clp);
+            }
+            sourceScroll.setVisibility(View.VISIBLE);
         }
         void bind(History.Message m) {
             if (metadata==null || metadata.saved!=m.saved || metadata.version!=m.version || metadata.versions!=m.versions) {
@@ -394,14 +476,50 @@ public final class MainActivity extends Activity {
     }
     private void body(Bubble b,String value,String state,String error) {
         b.painted=null;
-        String text=value;
+        String text=value==null ? "" : value;
+        boolean assistant="assistant".equals(b.metadata.role);
         if ("dice".equals(b.metadata.role) && text.startsWith("[骰子 ") && text.endsWith("]"))
             text=text.substring(4,text.length()-1).replace(" | ","  ·  ");
         if ("user".equals(b.metadata.role) && text.isEmpty() && b.files.isEmpty() && b.placeholder==null) text="判定";
-        if ("pending".equals(state) && text.isEmpty()) text="正在回复…";
+        if (assistant && !text.isEmpty() && MarkdownMath.hasRichSyntax(text)) {
+            String note="interrupted".equals(state) ? (TextUtils.isEmpty(error)?"回复已中断":error)
+                    : !TextUtils.isEmpty(error) ? error : "";
+            String sig=text+"\u0000"+note;
+            if (!sig.equals(b.richRendered)) {
+                b.richRendered=sig;
+                List<MarkdownMath.Block> blocks=MarkdownMath.parseBlocks(text);
+                int color=b.text.getCurrentTextColor();
+                float sizePx=b.text.getTextSize();
+                if (blocks.size()==1 && blocks.get(0).type==MarkdownMath.BlockType.PROSE) {
+                    if (b.richBox!=null) b.richBox.setVisibility(View.GONE);
+                    rich.bindProse(b.text,blocks.get(0).content,sizePx,color);
+                    b.text.setVisibility(View.VISIBLE);
+                } else {
+                    b.text.setVisibility(View.GONE);
+                    if (b.richBox!=null) {
+                        rich.bindBlocks(b.richBox,blocks,sizePx,color,b.tap,b.hold);
+                        b.richBox.setVisibility(View.VISIBLE);
+                    }
+                }
+                if (b.errorNote!=null) {
+                    if (note.isEmpty()) b.errorNote.setVisibility(View.GONE);
+                    else { b.errorNote.setText("（"+note+"）"); b.errorNote.setVisibility(View.VISIBLE); }
+                }
+            }
+            return;
+        }
+        b.richRendered=null;
+        if (b.richBox!=null) b.richBox.setVisibility(View.GONE);
+        if (b.errorNote!=null) b.errorNote.setVisibility(View.GONE);
+        if ("pending".equals(state) && text.isEmpty()) {
+            boolean showingWeb=b.webStatusChip!=null && b.webStatusChip.getVisibility()==View.VISIBLE;
+            text=showingWeb ? "" : "正在回复…";
+        }
         if ("interrupted".equals(state)) {
             String reason=TextUtils.isEmpty(error)?"回复已中断":error;
             text=text.isEmpty()?reason:text+"\n（"+reason+"）";
+        } else if (assistant && !TextUtils.isEmpty(error)) {
+            text=text.isEmpty()?error:text+"\n（"+error+"）";
         }
         b.text.setVisibility(text.isEmpty()?View.GONE:View.VISIBLE);
         if (!TextUtils.equals(text,b.text.getText())) b.text.setText(text);
@@ -418,6 +536,8 @@ public final class MainActivity extends Activity {
         } else user=bubbles.get(w.answerUser);
         if (user!=null) user.retry(w.error!=null?w:null,0);
         Bubble assistant=bubble(new History.Message(w.localReply,"assistant","",Collections.emptyList()));
+        assistant.webStatus(w.ended ? "" : w.webStatus);
+        assistant.sources(w.sources);
         body(assistant,"",w.error==null?"pending":"interrupted",w.error);
     }
     private void watch(ChatEngine.Work w) {
@@ -438,21 +558,40 @@ public final class MainActivity extends Activity {
         if (live.error!=null || live.stopped) writer.finish();
         writer.advance(now);
         String received=writer.text();
+        b.webStatus(live.ended || writer.length()>0 ? "" : live.webStatus);
+        b.sources(live.sources);
         if (writer.length()==0 || live.error!=null) body(b,received.isEmpty() || writer.length()==0?"":received,
                 live.error!=null?"interrupted":"pending",live.error);
         else {
             int n=writer.length();
-            int previous=b.text.length();
-            if (b.painted!=writer || b.revision!=writer.revision() || previous>n) {
-                b.text.setText(received.substring(0,n),TextView.BufferType.EDITABLE);
-                b.painted=writer; b.revision=writer.revision();
-            } else if (previous<n) b.text.append(received,previous,n);
-            b.text.setVisibility(View.VISIBLE);
+            String shown=received.substring(0,n);
+            boolean done=live.ended && !writer.moving();
+            String toolErr=done && !live.webError.isEmpty() ? live.webError : null;
+            if (MarkdownMath.hasRichSyntax(shown)) {
+                if (done || n==received.length() || b.richRendered==null || now-b.lastRichAt>=80) {
+                    b.lastRichAt=now;
+                    body(b,shown,done?"done":"pending",toolErr);
+                }
+            } else {
+                b.richRendered=null;
+                if (b.richBox!=null) b.richBox.setVisibility(View.GONE);
+                if (b.errorNote!=null) b.errorNote.setVisibility(View.GONE);
+                if (toolErr!=null) {
+                    body(b,shown,"done",toolErr);
+                } else {
+                    int previous=b.text.length();
+                    if (b.painted!=writer || b.revision!=writer.revision() || previous>n) {
+                        b.text.setText(shown,TextView.BufferType.EDITABLE);
+                        b.painted=writer; b.revision=writer.revision();
+                    } else if (previous<n) b.text.append(received,previous,n);
+                    b.text.setVisibility(View.VISIBLE);
+                }
+            }
         }
         Bubble user=bubbles.get(live.user!=0?live.user:live.localUser);
         if (user!=null) user.progress(live.preparing && !live.ended,live.batch!=null?live.batch.remaining.size():0,
                 live.batch!=null && live.batch.document);
-        if (!live.ended && live.usage!=null && live.model.equals(app.account.selected)) {
+        if (!live.ended && live.usage!=null) {
             String percent=live.usage.percent();
             if (!TextUtils.equals(percent,meter.getText())) { meter.setText(percent); meter.setContentDescription("上下文用量 "+percent); }
         }
@@ -538,9 +677,41 @@ public final class MainActivity extends Activity {
         }
         new AlertDialog.Builder(this).setTitle("分支").setItems(labels.toArray(new String[0]),(d,i)->actions.get(i).run()).show();
     }
+    private void styleWebToggle() {
+        if (webToggle==null) return;
+        boolean on=app.webSearchEnabled();
+        webToggle.setSelected(on); webToggle.setActivated(on);
+        webToggle.setColorFilter(on ? BLUE : DIM);
+        a.buttonStyle(webToggle,on ? PALE : WHITE,12);
+    }
+    private void toggleWebSearch() {
+        app.webSearchEnabled(!app.webSearchEnabled());
+        if (webToggle!=null) webToggle.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+        styleWebToggle();
+    }
+    private void renameChat() {
+        if (selectedChat==null) return;
+        EditText field=new EditText(this); field.setSingleLine();
+        field.setText(selectedChat.title); field.setSelection(field.length());
+        AlertDialog dialog=new AlertDialog.Builder(this).setTitle("重命名").setView(field)
+                .setNegativeButton("取消",null).setPositiveButton("保存",null).create();
+        dialog.setOnShowListener(d->dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{
+            String value=field.getText().toString().trim();
+            if (value.isEmpty()) return;
+            app.history.rename(chatId,value); dialog.dismiss(); update();
+        }));
+        dialog.show();
+    }
     private void messageMenu(long id) {
         History.Message m=app.history.at(draftBranch,id);
         List<String> labels=new ArrayList<>(); List<Runnable> actions=new ArrayList<>();
+        if (m.text!=null && !m.text.isEmpty()) {
+            labels.add("复制");
+            actions.add(()->{
+                android.content.ClipboardManager cm=getSystemService(android.content.ClipboardManager.class);
+                if (cm!=null) { cm.setPrimaryClip(ClipData.newPlainText("message",m.text)); toast("已复制"); }
+            });
+        }
         labels.add(m.saved?"取消存档":"存档");
         actions.add(()->{ app.history.bookmark(draftBranch,id,!m.saved); draw(); jump(id); });
         if (!app.chat.busy()) {

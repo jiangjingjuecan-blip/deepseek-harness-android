@@ -43,6 +43,11 @@ final class DeviceContext {
             onUi(()->{
                 click("历史对话"); click("新建对话");
             });
+            if ("web-ui".equals(mode)) {
+                DeviceWebAndMath web=new DeviceWebAndMath(test,activity,port);
+                try { web.run(); } finally { stage=web.stage; }
+                return;
+            }
             if ("send-ui".equals(mode)) {
                 DeviceSendUi ui=new DeviceSendUi(test,activity,port);
                 try { ui.run(); } finally { stage=ui.stage; if (ui.revealRate!=null) result.putString("reveal_rate",ui.revealRate); }

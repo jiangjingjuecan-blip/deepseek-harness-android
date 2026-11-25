@@ -30,6 +30,12 @@ public final class HarnessApp extends Application {
     }
     void listen(Runnable callback) { listener=callback; }
     void listenStream(Runnable callback) { streamListener=callback; }
+    boolean webSearchEnabled() {
+        return getSharedPreferences("ui",MODE_PRIVATE).getBoolean(WebTools.PREF,WebTools.DEFAULT_ENABLED);
+    }
+    void webSearchEnabled(boolean enabled) {
+        getSharedPreferences("ui",MODE_PRIVATE).edit().putBoolean(WebTools.PREF,enabled).apply();
+    }
     void streamChanged() {
         if (streamListener!=null && streamPosted.compareAndSet(false,true)) main.post(()->
             android.view.Choreographer.getInstance().postFrameCallback(t->{

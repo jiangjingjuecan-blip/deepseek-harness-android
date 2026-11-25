@@ -39,7 +39,7 @@ class Server(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(obj).encode())
 
     def do_GET(self):
-        if self.server.send_ui and self.path == '/fixture-next':
+        if (self.server.send_ui or self.server.web_gate) and self.path == '/fixture-next':
             self.server.advance.set()
             self.json({})
             return
@@ -110,7 +110,15 @@ class Server(BaseHTTPRequestHandler):
             self.stream('附件已收到')
             return
         if self.is_title(obj):
-            self.stream('回放')
+            if 'Generate a concise conversation title' in str(obj.get('system', '')):
+                if self.server.web:
+                    self.server.seen.add('fallback-title')
+                self.stream('离线模型话题')
+            else:
+                self.stream('回放')
+            return
+        if self.server.web:
+            self.handle_web(obj, msgs, last)
             return
         if self.server.send_feel:
             question = next((b.get('text', '') for b in msgs[-1]['content']
@@ -332,6 +340,227 @@ class Server(BaseHTTPRequestHandler):
         event('message_delta', delta={'stop_reason':'end_turn'},usage={'output_tokens':2})
         event('message_stop')
 
+    def handle_web(self, obj, msgs, last):
+        tools = obj.get('tools')
+        both_tools = [
+            {'type': 'deepseek_web_search', 'name': 'deepseek_web_search'},
+            {'type': 'deepseek_read_url', 'name': 'deepseek_read_url'},
+        ]
+        read_only = [{'type': 'deepseek_read_url', 'name': 'deepseek_read_url'}]
+        if 'tool_choice' in obj:
+            self.send_error(400)
+            return
+
+        def send_sse(frames):
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.end_headers()
+            for item in frames:
+                if item == 'WAIT':
+                    self.server.advance.wait(15)
+                    continue
+                if item == 'KEEPALIVE':
+                    self.wfile.write(b': keep-alive\n\n')
+                    self.wfile.flush()
+                    continue
+                kind, payload = item
+                self.wfile.write(f'event: {kind}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n'.encode())
+                self.wfile.flush()
+
+        if '冰岛人口' in last:
+            if obj.get('model') != 'deepseek-flash' or tools != both_tools or obj.get('title') != {'enabled': True}:
+                self.send_error(400)
+                return
+            self.server.seen.add('web-search')
+            frames = [
+                ('message_start', {'type': 'message_start', 'message': {'id': 'w1', 'model': 'deepseek-flash', 'usage': {'input_tokens': 300}}}),
+                ('content_block_start', {'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'thinking', 'thinking': ''}}),
+                ('content_block_delta', {'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'thinking_delta', 'thinking': '查一下冰岛人口'}}),
+                ('content_block_delta', {'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'signature_delta', 'signature': 'th-sig-1'}}),
+                ('content_block_stop', {'type': 'content_block_stop', 'index': 0}),
+                ('content_block_start', {'type': 'content_block_start', 'index': 1, 'content_block': {
+                    'type': 'server_tool_use', 'id': 'srvtoolu_s_00_test', 'name': 'deepseek_web_search',
+                    'input': {'action': 'search', 'queries': ['Iceland population 2025']},
+                    'caller': {'type': 'direct'}, 'kind': 'deep_search'}}),
+                ('content_block_stop', {'type': 'content_block_stop', 'index': 1}),
+                'KEEPALIVE',
+            ]
+            if self.server.web_gate:
+                frames.append('WAIT')
+            frames += [
+                ('content_block_start', {'type': 'content_block_start', 'index': 2, 'content_block': {
+                    'type': 'web_search_tool_result', 'tool_use_id': 'srvtoolu_s_00_test', 'kind': 'deep_search',
+                    'content': [
+                        {'type': 'web_search_result', 'title': '冰岛统计局人口预测', 'url': 'https://wallstreetcn.com/livenews/3197120',
+                         'encrypted_content': 'enc-wscn', 'page_age': '2026-01-02T00:00:00+00:00', 'snippet': '39.4 万', 'site_name': '华尔街见闻', 'site_icon': None},
+                        {'type': 'web_search_result', 'title': '2024年冰岛人口分析', 'url': 'https://www.huaon.com/channel/globaldata/1112834.html',
+                         'encrypted_content': 'enc-huaon', 'page_age': '2025-10-15T16:00:00+00:00', 'snippet': '40.46 万', 'site_name': '华经情报网', 'site_icon': None},
+                    ]}}),
+                ('content_block_stop', {'type': 'content_block_stop', 'index': 2}),
+                ('content_block_start', {'type': 'content_block_start', 'index': 3, 'content_block': {
+                    'type': 'server_tool_use', 'id': 'srvtoolu_ds_01_test', 'name': 'deepseek_web_search',
+                    'input': {'action': 'open_page', 'url': 'https://www.huaon.com/channel/globaldata/1112834.html'},
+                    'caller': {'type': 'direct'}, 'kind': 'deep_search'}}),
+                ('content_block_stop', {'type': 'content_block_stop', 'index': 3}),
+                ('content_block_start', {'type': 'content_block_start', 'index': 4, 'content_block': {
+                    'type': 'web_fetch_tool_result', 'tool_use_id': 'srvtoolu_ds_01_test', 'kind': 'deep_search',
+                    'content': {'type': 'web_fetch_result', 'url': 'https://www.huaon.com/channel/globaldata/1112834.html',
+                                'content': {'type': 'document', 'source': {'type': 'text', 'media_type': 'text/plain', 'data': ''}, 'title': '2024年冰岛人口分析'},
+                                'published_at': None}}}),
+                ('content_block_stop', {'type': 'content_block_stop', 'index': 4}),
+                ('content_block_start', {'type': 'content_block_start', 'index': 5, 'content_block': {'type': 'text', 'text': ''}}),
+                ('content_block_delta', {'type': 'content_block_delta', 'index': 5, 'delta': {'type': 'text_delta', 'text': '冰岛人口约为 **39.4 万**'}}),
+                ('content_block_delta', {'type': 'content_block_delta', 'index': 5, 'delta': {'type': 'citations_delta', 'citation': {
+                    'type': 'web_search_result_location', 'url': 'https://wallstreetcn.com/livenews/3197120',
+                    'title': '冰岛统计局人口预测', 'encrypted_index': '', 'cited_text': '冰岛人口约为 **39.4 万**'}}}),
+                ('content_block_stop', {'type': 'content_block_stop', 'index': 5}),
+                ('content_block_start', {'type': 'content_block_start', 'index': 6, 'content_block': {'type': 'text', 'text': ''}}),
+                ('content_block_delta', {'type': 'content_block_delta', 'index': 6, 'delta': {'type': 'text_delta', 'text': '，2024 年约为 **40.46 万**。'}}),
+                ('content_block_delta', {'type': 'content_block_delta', 'index': 6, 'delta': {'type': 'citations_delta', 'citation': {
+                    'type': 'web_search_result_location', 'url': 'https://www.huaon.com/channel/globaldata/1112834.html',
+                    'title': '2024年冰岛人口分析', 'encrypted_index': '', 'cited_text': '2024 年约为 **40.46 万**。'}}}),
+                ('content_block_stop', {'type': 'content_block_stop', 'index': 6}),
+                ('message_delta', {'type': 'message_delta', 'delta': {'stop_reason': 'end_turn', 'stop_sequence': None, 'title': '冰岛人口统计'},
+                                   'usage': {'input_tokens': 1200, 'output_tokens': 60}}),
+                ('message_stop', {'type': 'message_stop'}),
+            ]
+            send_sse(frames)
+            return
+
+        if 'https://example.com/post' in last:
+            assistants = [m for m in msgs if m['role'] == 'assistant']
+            has_prior_search = bool(assistants) and any(b.get('type') == 'web_search_tool_result' for b in assistants[0]['content'])
+            if obj.get('model') != 'deepseek-flash' or tools != read_only or 'title' in obj or not has_prior_search:
+                self.send_error(400)
+                return
+            self.server.seen.add('read-url')
+            send_sse([
+                ('message_start', {'type': 'message_start', 'message': {'id': 'w2', 'model': 'deepseek-flash', 'usage': {'input_tokens': 400}}}),
+                ('content_block_start', {'type': 'content_block_start', 'index': 0, 'content_block': {
+                    'type': 'server_tool_use', 'id': 'srvtoolu_rl_00_test', 'name': 'deepseek_read_url',
+                    'input': {'action': 'read_link', 'url': 'https://example.com/post'},
+                    'caller': {'type': 'direct'}, 'kind': 'read_link'}}),
+                ('content_block_stop', {'type': 'content_block_stop', 'index': 0}),
+                ('content_block_start', {'type': 'content_block_start', 'index': 1, 'content_block': {
+                    'type': 'web_fetch_tool_result', 'tool_use_id': 'srvtoolu_rl_00_test', 'kind': 'read_link',
+                    'signature': 'sig-example-post-v1',
+                    'content': {'type': 'web_fetch_result', 'url': 'https://example.com/post',
+                                'content': {'type': 'document', 'source': {'type': 'text', 'media_type': 'text/plain', 'data': ''}, 'title': 'Example Post'},
+                                'published_at': '2026-01-01'}}}),
+                ('content_block_stop', {'type': 'content_block_stop', 'index': 1}),
+                ('content_block_start', {'type': 'content_block_start', 'index': 2, 'content_block': {'type': 'text', 'text': ''}}),
+                ('content_block_delta', {'type': 'content_block_delta', 'index': 2, 'delta': {'type': 'text_delta', 'text': '该页面介绍了示例域名用途。'}}),
+                ('content_block_delta', {'type': 'content_block_delta', 'index': 2, 'delta': {'type': 'citations_delta', 'citation': {
+                    'type': 'web_search_result_location', 'url': 'https://example.com/post',
+                    'title': 'Example Post', 'encrypted_index': '', 'cited_text': '该页面介绍了示例域名用途。'}}}),
+                ('content_block_stop', {'type': 'content_block_stop', 'index': 2}),
+                ('message_delta', {'type': 'message_delta', 'delta': {'stop_reason': 'end_turn'}, 'usage': {'input_tokens': 500, 'output_tokens': 25}}),
+                ('message_stop', {'type': 'message_stop'}),
+            ])
+            return
+
+        if '引用第一句' in last or '恢复后继续' in last:
+            restored = '恢复后继续' in last
+            has_sig = any(
+                m['role'] == 'assistant' and any(
+                    b.get('type') == 'web_fetch_tool_result' and b.get('kind') == 'read_link' and b.get('signature') == 'sig-example-post-v1'
+                    for b in m['content'])
+                for m in msgs)
+            want_title = not restored
+            if not has_sig or (want_title and obj.get('title') != {'enabled': True}) or (not want_title and 'title' in obj):
+                self.send_error(400)
+                return
+            self.server.seen.add('restored-sig' if restored else 'multi-sig')
+            delta = {'stop_reason': 'end_turn'}
+            if want_title:
+                delta['title'] = '冰岛与网页摘要'
+            send_sse([
+                ('message_start', {'type': 'message_start', 'message': {'id': 'w3', 'model': 'deepseek-flash', 'usage': {'input_tokens': 600}}}),
+                ('content_block_start', {'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}}),
+                ('content_block_delta', {'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': '已恢复上下文。' if restored else '第一句为 Example Domain。'}}),
+                ('content_block_stop', {'type': 'content_block_stop', 'index': 0}),
+                ('message_delta', {'type': 'message_delta', 'delta': delta, 'usage': {'input_tokens': 600, 'output_tokens': 20}}),
+                ('message_stop', {'type': 'message_stop'}),
+            ])
+            return
+
+        if '公式展示' in last:
+            self.server.seen.add('math-reply')
+            math_body = (
+                '### 结果\n\n'
+                '先对分母做实系数因式分解：\n\n'
+                '$$x^5+1=(x+1)\\left(x^4-x^3+x^2-x+1\\right)$$\n\n'
+                '部分分式展开后，首项为 $\\frac{1}{5(x+1)}$，其余项含 $\\frac{2}{5}(1-x\\cos\\theta)$：\n\n'
+                '$$\\int_0^1 \\frac{dx}{x^5+1} = \\frac{1}{5}\\ln 2 + \\sum_{\\theta}\\left[\\frac{2}{5}\\sin\\theta\\arctan\\left(\\frac{x-\\cos\\theta}{\\sin\\theta}\\right)\\right]\\Bigg|_{\\theta=\\pi/5,\\;3\\pi/5}$$\n\n'
+                '---\n\n'
+                '| 项 | 表达式 | 示例 |\n'
+                '| :--- | :---: | ---: |\n'
+                '| 线性项 | $\\frac{1}{5(x+1)}$ | $5 and $10 |\n'
+                '| 矩阵 | $\\begin{pmatrix} 1 & 2 \\\\ 3 & 4 \\end{pmatrix}$ | $20 |\n\n'
+                '```python\n'
+                'price = "$5 and $10"  # not math\n'
+                '```'
+            )
+            delta = {'stop_reason': 'end_turn'}
+            if obj.get('title') == {'enabled': True}:
+                delta['title'] = '五次分式积分'
+            send_sse([
+                ('message_start', {'type': 'message_start', 'message': {'id': 'wm', 'model': 'deepseek-flash', 'usage': {'input_tokens': 100}}}),
+                ('content_block_start', {'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}}),
+                ('content_block_delta', {'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': math_body}}),
+                ('content_block_stop', {'type': 'content_block_stop', 'index': 0}),
+                ('message_delta', {'type': 'message_delta', 'delta': delta, 'usage': {'input_tokens': 100, 'output_tokens': 120}}),
+                ('message_stop', {'type': 'message_stop'}),
+            ])
+            return
+
+        if '搜索出错测试' in last:
+            self.server.seen.add('search-error')
+            send_sse([
+                ('message_start', {'type': 'message_start', 'message': {'id': 'we', 'model': 'deepseek-flash', 'usage': {'input_tokens': 100}}}),
+                ('content_block_start', {'type': 'content_block_start', 'index': 0, 'content_block': {
+                    'type': 'server_tool_use', 'id': 'srvtoolu_s_err', 'name': 'deepseek_web_search',
+                    'input': {'action': 'search', 'queries': ['failing query']}, 'caller': {'type': 'direct'}, 'kind': 'search'}}),
+                ('content_block_stop', {'type': 'content_block_stop', 'index': 0}),
+                ('content_block_start', {'type': 'content_block_start', 'index': 1, 'content_block': {
+                    'type': 'web_search_tool_result', 'tool_use_id': 'srvtoolu_s_err', 'kind': 'search',
+                    'content': [{'type': 'web_search_tool_result_error', 'error_code': 'unavailable'}]}}),
+                ('content_block_stop', {'type': 'content_block_stop', 'index': 1}),
+                ('content_block_start', {'type': 'content_block_start', 'index': 2, 'content_block': {'type': 'text', 'text': ''}}),
+                ('content_block_delta', {'type': 'content_block_delta', 'index': 2, 'delta': {'type': 'text_delta', 'text': '暂时无法联网，以下为离线回答。'}}),
+                ('content_block_stop', {'type': 'content_block_stop', 'index': 2}),
+                ('message_delta', {'type': 'message_delta', 'delta': {'stop_reason': 'end_turn'}, 'usage': {'input_tokens': 100, 'output_tokens': 20}}),
+                ('message_stop', {'type': 'message_stop'}),
+            ])
+            return
+
+        if '风险测试' in last:
+            self.server.seen.add('risk-400')
+            self.send_response(400)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(b'{"error":{"type":"invalid_request_error","message":"Content Exists Risk"}}')
+            return
+
+        if '切模型测试' in last:
+            if obj.get('model') != 'deepseek-flash' or tools != both_tools:
+                self.send_error(400)
+                return
+            self.server.seen.add('flash-route')
+            self.stream('已切换至联网模型。')
+            return
+
+        if '离线模型测试' in last:
+            has_web = any(isinstance(t, dict) and t.get('type') in ('deepseek_web_search', 'deepseek_read_url') for t in (tools or []))
+            if obj.get('model') != 'deepseek-v4-pro' or has_web or 'title' in obj:
+                self.send_error(400)
+                return
+            self.server.seen.add('pro-route')
+            self.stream('离线模型回答。')
+            return
+
+        self.send_error(400)
+
 
 def run(abi, root, serial=None, scenario='context'):
     layout = ROOT / 'runtime-cache' / abi
@@ -352,6 +581,8 @@ def run(abi, root, serial=None, scenario='context'):
     with ThreadingHTTPServer(('127.0.0.1',0),Server) as server:
         server.send_ui=scenario=='send-ui'
         server.send_feel=scenario in ('send-bench', 'send-ui')
+        server.web=scenario in ('web', 'web-ui')
+        server.web_gate=scenario in ('web', 'web-ui')
         server.device_adventure=scenario=='adventure-ui'
         server.device_roll=None
         server.adventure=scenario=='adventure'
@@ -407,6 +638,8 @@ def run(abi, root, serial=None, scenario='context'):
                     if line.strip()=='advance':
                         server.advance.set()
                     if line.strip()=='done':
+                        if server.web:
+                            return {'web-search','read-url','multi-sig','restored-sig','math-reply','search-error','risk-400','flash-route','pro-route','fallback-title'} <= server.seen
                         if server.adventure:
                             return server.matched>0 and not server.mismatches and server.expected.empty()
                         return (server.summaries == ['a','b'] and
@@ -435,6 +668,8 @@ def device(serial, server, root, runtime_port, bootstrap, scenario):
                               stdout=subprocess.PIPE,text=True,check=True)
         print(result.stdout, end='')
         print('Provider observations:',', '.join(sorted(server.seen)))
+        if scenario=='web-ui':
+            return 'passed=web-ui' in result.stdout and {'web-search','read-url','math-reply'} <= server.seen
         if scenario=='send-ui':
             return 'passed=send-ui' in result.stdout and {'采样重试','采样停止','采样八字','采样即时'} <= server.seen
         if scenario=='send-bench':
@@ -452,9 +687,9 @@ def device(serial, server, root, runtime_port, bootstrap, scenario):
 
 if __name__=='__main__':
     os.umask(0o077)
-    if len(sys.argv)==3 and sys.argv[1] in ('--device','--device-attachments','--device-adventure','--device-send-bench','--device-send-ui'):
+    if len(sys.argv)==3 and sys.argv[1] in ('--device','--device-attachments','--device-adventure','--device-send-bench','--device-send-ui','--device-web-ui'):
         with tempfile.TemporaryDirectory(prefix='phone-context-') as root:
-            raise SystemExit(0 if run('arm64-v8a',Path(root),sys.argv[2], {'--device':'context','--device-attachments':'attachments','--device-adventure':'adventure-ui','--device-send-bench':'send-bench','--device-send-ui':'send-ui'}[sys.argv[1]]) else 1)
-    if not all(stat.S_ISFIFO(os.fstat(fd).st_mode) for fd in (0,1)) or (len(sys.argv)!=3 and sys.argv[3:]!=['adventure']):
+            raise SystemExit(0 if run('arm64-v8a',Path(root),sys.argv[2], {'--device':'context','--device-attachments':'attachments','--device-adventure':'adventure-ui','--device-send-bench':'send-bench','--device-send-ui':'send-ui','--device-web-ui':'web-ui'}[sys.argv[1]]) else 1)
+    if not all(stat.S_ISFIFO(os.fstat(fd).st_mode) for fd in (0,1)) or (len(sys.argv)!=3 and sys.argv[3:] not in (['adventure'], ['web'])):
         raise SystemExit('Run the Gradle replay test.')
     raise SystemExit(0 if run(sys.argv[1],Path(sys.argv[2]),scenario=sys.argv[3] if len(sys.argv)==4 else 'context') else 1)

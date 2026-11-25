@@ -1,5 +1,18 @@
 # 安卓安装包验证
 
+## v0.1.8-test
+
+- ARM64 签名 APK 为 **135,200,002 字节（128.94 MiB）**，SHA-256 为 `1eecfac65d89e1373ae3651637ddd04353f20e1e569b10045979bba97772968c`。包名 `com.sunwin.deepseekharness`，versionCode 9，versionName 0.1.8，minSdk 29，targetSdk 34。APK v2 签名和 ZIP 对齐检查通过。与 v0.1.0-test 至 v0.1.7-test 的八份公开包核对，签名证书 SHA-256 均为 `b849e51b4f5a8691ffca6eecbae2592fc28afe06acccc148c52b67f2abc2079e`，包内 30 个 ARM64 原生库与 0.1.7 逐个字节一致。[下载 APK](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/download/v0.1.8-test/deepseek-harness-test.apk)
+- 宿主机分别以 `HARNESS_REPLAY=x86_64` 和 `HARNESS_REPLAY=arm64-v8a` 运行发布版测试。两组均为 **73 项通过，0 项跳过**，覆盖 DeepSeek 服务端联网搜索/网页阅读（默认开关、`deepseek-flash` 自动路由、关闭时仅声明 `deepseek_read_url`、`tool_choice` 保护、搜索/读网页状态事件、引用来源、多轮及 `/phone-restore` 重开带回 `server_tool_use` 与 `signature`、搜索失败/400 内容安全错误处理）、本机离线 Markdown 与 LaTeX 数学公式解析与渲染（`$...$`/`\(...\)`/`$$...$$`/`\[...\]`、货币 `$5 and $10` 不误判、未闭合流式保护、表格/代码块/矩阵/`align*` 规范化、宽公式横向滚动无左裁切、复制保留原 LaTeX 源码）、AI 对话标题（原生 `title.enabled` 与非 flash 回退、第 1/3 轮及懒迁移触发、手动重命名保护与 SQLite v8→v9 升级），以及既有全部官方 DSH 0.2.2-rc.2 文游、逐字显示、上下文压缩与附件回放。[联网回放测试](../app/src/test/java/com/sunwin/deepseekharness/WebToolsReplayTest.java) · [联网与标题单测](../app/src/test/java/com/sunwin/deepseekharness/WebToolsAndTitleTest.java) · [公式与 Markdown 测试](../app/src/test/java/com/sunwin/deepseekharness/MarkdownMathTest.java)
+- 在 Android 10（API 29）ARM64 模拟器 `harnessarm` 上，先安装 0.1.7 并用 `web-seed-v8` 在 SQLite 8 写入照片、回复、DSH 会话标识与用量，再覆盖安装 0.1.8（升级至 SQLite 9）。设备内 APK 摘要与交付文件一致。`self-check` 通过，核对了应用数据目录 `execve` / 旧硬链接 `EACCES` 与缺失绑定 `BIND_MISMATCH`。
+- 同一安装一次通过全部界面与格式回归：
+  - `web-ui`（`passed=web-ui`，`Provider observations: math-reply, read-url, web-search`）：验证地球联网开关默认开启及关闭后仅声明 `deepseek_read_url`、搜索与读网页状态芯片及完成后收起、引用来源芯片及点击打开 URL、AI 生成标题在顶栏与历史列表持久化显示及手动重命名不被覆盖、完整 Markdown + LaTeX（含宽积分公式、行内分式、矩阵表格、`$5 and $10` 货币、Python 代码块）渲染与长按复制保留原始源码；截图复核确认宽块级积分公式左起完整无裁切、表格矩阵与代码块排版清晰。[联网与公式界面测试](../app/src/androidTest/java/com/sunwin/deepseekharness/DeviceWebAndMath.java)
+  - `send-ui`（`passed=send-ui`）：验证多行输入、待发照片芯片、写库失败占位与重试、轻点补全、上翻锁定与回到底部、流式中「停止」、默认 **8 字/秒** 逐字展开（2062 ms 内从 4 字展开至 21 字，实测 **8.24 字/秒**）、即时切换、历史重开及重生成版本切换。
+  - `adventure-ui`（`passed=adventure-ui`）：读回 0.1.7 升级前数据，验证存档、掷 d20、重生成、版本翻页、编辑用户与 AI 消息及开分支，接收端核对全部 6 次请求。
+  - `delete`（`passed=delete`）：验证历史长按删除取消、删非当前对话、删当前对话打开空对话。
+  - `attachments`、`attachments-reopen` 与 `attachment-pdf` 全部一次通过：验证 3 张手选/拍照照片、TXT 与 DOCX（2 张内嵌图）、点 `[图 2]` 全屏查看、滑动与缩放、新进程读回附件及升级前旧照片，以及原生 PdfRenderer 与 Office 夹具。
+- 本版测试全部使用本地回环夹具，真实账号模型调用 **0 次**。本轮设备验证仅使用模拟器。[回放入口](../tools/replay.py)
+
 ## v0.1.7-test
 
 - ARM64 签名 APK 为 **134,368,118 字节（128.14 MiB）**，SHA-256 为 `49709ee28205a7f6f647ba9370238a4929984860cd0b87c563cae459677d12bd`。包名 `com.sunwin.deepseekharness`，versionCode 8，versionName 0.1.7，minSdk 29，targetSdk 34。APK v2 签名和 ZIP 对齐检查通过。与 v0.1.0-test 至 v0.1.6-test 的七份公开包核对，签名证书 SHA-256 均为 `b849e51b4f5a8691ffca6eecbae2592fc28afe06acccc148c52b67f2abc2079e`。[下载 APK](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/download/v0.1.7-test/deepseek-harness-test.apk)

@@ -1,10 +1,13 @@
-// This preset supplies range selection. DSH owns the meter, summary call, journal
+// This preset supplies range selection, native DeepSeek web-tools wire bridging,
+// and in-band/fallback chat titles. DSH owns the meter, summary call, journal
 // transaction, image projection and provider serialization.
+const { AsyncLocalStorage } = require('node:async_hooks')
 const DOCUMENT_IMAGE_COST = 1024 + 8 + 8
 const RECENT_TURNS = 4
 const MARGIN = 16_384
 const MARKER = 'phone-compact'
 const RESTORE = 'phone-restore'
+const WEB_HANDLER = 'phone-web'
 
 function catalogModel(model) {
   return model === 'deepseek-flash' || model === 'deepseek-v4-pro'
@@ -108,13 +111,355 @@ function legacyCuts(session, expected) {
   return cuts
 }
 
+// Record phone-web metadata using DSH's built-in non-surface `hook/result` event
+// so the JSONL v4 journal stays 100% canonical across reloads, forks and follow streams.
+function emitWebEvent(session, turn, point, payload) {
+  try {
+    return session.append('hook/result', {
+      turn: Number.isSafeInteger(turn) && turn >= 0 ? turn : 0,
+      point: 'phone-web:' + point,
+      handlerId: WEB_HANDLER,
+      decision: JSON.stringify(payload),
+      durationMs: 0,
+    })
+  } catch {
+    return null
+  }
+}
+
+// Collect saved server tool blocks per visible assistant turn on the session surface.
+// Walk surface order with the same non-empty/coalescing rule as DeepSeekAdapter.serialize.
+function surfaceWebBlocks(session) {
+  const bySeq = new Map()
+  const byTurnStep = new Map()
+  for (let seq = 0; seq < session.seq; seq++) {
+    const e = session.eventAt(seq)
+    if (e.type !== 'hook/result' || e.data?.handlerId !== WEB_HANDLER || e.data?.point !== 'phone-web:blocks') continue
+    try {
+      const payload = JSON.parse(e.data.decision)
+      if (!Array.isArray(payload.blocks) || !payload.blocks.length) continue
+      if (Number.isSafeInteger(payload.assistantSeq)) bySeq.set(payload.assistantSeq, payload.blocks)
+      else byTurnStep.set(`${e.data.turn}:${payload.step ?? 0}`, payload.blocks)
+    } catch {}
+  }
+  if (!bySeq.size && !byTurnStep.size) return []
+  const assistantTurns = []
+  let lastWireRole = null
+  for (const seq of session.surface.nodes) {
+    const e = session.eventAt(seq)
+    const msg = session.deriveEventMessage(e)
+    if (!msg) continue
+    if (msg.role === 'system' || msg.role === 'developer') continue
+    if (msg.role === 'assistant') {
+      const hasContent = msg.content.some(b => (b.type === 'text' && b.text.length > 0) || b.type === 'reasoning' || b.type === 'tool-call')
+      if (!hasContent) continue
+      const saved = bySeq.get(e.seq) ?? (msg.source?.provider !== 'phone-local' ? byTurnStep.get(`${e.data.turn}:${e.data.step ?? 0}`) : null)
+      if (lastWireRole === 'assistant' && assistantTurns.length) {
+        if (saved?.length) {
+          const prev = assistantTurns[assistantTurns.length - 1]
+          assistantTurns[assistantTurns.length - 1] = prev ? prev.concat(saved) : saved
+        }
+      } else {
+        assistantTurns.push(saved ?? null)
+      }
+      lastWireRole = 'assistant'
+    } else if (msg.role === 'user' || msg.role === 'tool') {
+      if (msg.role === 'user' && !msg.content.length) continue
+      lastWireRole = 'user'
+    }
+  }
+  return assistantTurns
+}
+
+// Re-inject saved server_tool_use / web_*_tool_result blocks into serialized assistant messages.
+function injectHistoryWebBlocks(session, wireMessages) {
+  const savedTurns = surfaceWebBlocks(session)
+  if (!savedTurns.length) return
+  const wireAssistants = wireMessages.filter(m => m.role === 'assistant')
+  if (wireAssistants.length !== savedTurns.length) return
+  for (let i = 0; i < wireAssistants.length; i++) {
+    const entries = savedTurns[i]
+    if (!entries?.length) continue
+    const content = Array.isArray(wireAssistants[i].content) ? wireAssistants[i].content : []
+    const hasThinking = content.some(b => b.type === 'thinking')
+    if (!hasThinking) {
+      // Restored from SQLite (text only): place server tool blocks before answer text.
+      const blocks = entries.map(item => item.block ?? item).filter(b => b && typeof b === 'object')
+      wireAssistants[i].content = blocks.concat(content)
+    } else {
+      // Live DSH session: splice each block back at its exact recorded slot among thinking/text blocks.
+      const out = []
+      let cursor = 0
+      const sorted = entries.map((item, idx) => ({
+        slot: Number.isSafeInteger(item.slot) ? Math.max(0, Math.min(item.slot, content.length)) : 0,
+        idx,
+        block: item.block ?? item,
+      })).filter(x => x.block && typeof x.block === 'object')
+        .sort((a, b) => a.slot - b.slot || a.idx - b.idx)
+      for (const item of sorted) {
+        while (cursor < item.slot) out.push(content[cursor++])
+        out.push(item.block)
+      }
+      while (cursor < content.length) out.push(content[cursor++])
+      wireAssistants[i].content = out
+    }
+  }
+}
+
+function isServerToolBlock(type) {
+  return type === 'server_tool_use' || type === 'web_search_tool_result' || type === 'web_fetch_tool_result'
+}
+
+// Wrap a DeepSeek Messages SSE stream: intercept server tool calls/results/citations/title
+// for Android while handing DSH a clean remapped stream it natively understands.
+function transformWebSse(bodyStream, session, turn, step) {
+  const decoder = new TextDecoder()
+  const encoder = new TextEncoder()
+  const indexMap = new Map()
+  const suppressed = new Set()
+  const collectedBlocks = []
+  const sourcesByUrl = new Map()
+  const citations = []
+  const citationUrls = new Set()
+  const toolErrors = []
+  let nextMappedIndex = 0
+  let buffer = ''
+  let flushedBlocks = false
+  let refused = false
+
+  function flushCollected() {
+    if (flushedBlocks) return
+    flushedBlocks = true
+    if (collectedBlocks.length || citations.length || toolErrors.length) {
+      emitWebEvent(session, turn, 'blocks', {
+        step,
+        blocks: collectedBlocks,
+        citations,
+        errors: toolErrors,
+      })
+    }
+  }
+
+  function recordSourcesFromBlock(cb) {
+    if (cb.type === 'web_search_tool_result') {
+      const items = Array.isArray(cb.content) ? cb.content : (cb.content ? [cb.content] : [])
+      let count = 0
+      let errorCode = ''
+      for (const item of items) {
+        if (!item || typeof item !== 'object') continue
+        if (item.type === 'web_search_tool_result_error') {
+          errorCode = typeof item.error_code === 'string' ? item.error_code : 'unavailable'
+        } else if (item.type === 'web_search_result' && typeof item.url === 'string' && item.url) {
+          count++
+          if (!sourcesByUrl.has(item.url)) {
+            sourcesByUrl.set(item.url, {
+              url: item.url,
+              title: typeof item.title === 'string' ? item.title : '',
+              site: typeof item.site_name === 'string' ? item.site_name : '',
+            })
+          }
+        }
+      }
+      if (errorCode) toolErrors.push({ toolUseId: cb.tool_use_id || '', kind: cb.kind || 'search', errorCode })
+      emitWebEvent(session, turn, 'result', {
+        toolUseId: cb.tool_use_id || '',
+        kind: cb.kind || 'search',
+        count,
+        errorCode,
+      })
+    } else if (cb.type === 'web_fetch_tool_result') {
+      const c = cb.content
+      let errorCode = ''
+      let url = ''
+      if (c && typeof c === 'object') {
+        if (c.type === 'web_fetch_tool_result_error') {
+          errorCode = typeof c.error_code === 'string' ? c.error_code : 'unavailable'
+        } else if (c.type === 'web_fetch_result' && typeof c.url === 'string' && c.url) {
+          url = c.url
+          const title = typeof c.content?.title === 'string' ? c.content.title : ''
+          if (!sourcesByUrl.has(url)) sourcesByUrl.set(url, { url, title, site: '' })
+        }
+      }
+      if (errorCode) toolErrors.push({ toolUseId: cb.tool_use_id || '', kind: cb.kind || 'read_link', errorCode })
+      emitWebEvent(session, turn, 'result', {
+        toolUseId: cb.tool_use_id || '',
+        kind: cb.kind || 'read_link',
+        count: url ? 1 : 0,
+        errorCode,
+      })
+    }
+  }
+
+  function processFrame(rawFrame, controller) {
+    const lines = rawFrame.split(/\r?\n/)
+    let eventName = null
+    const dataLines = []
+    const commentLines = []
+    for (const line of lines) {
+      if (line.startsWith(':')) commentLines.push(line)
+      else if (line.startsWith('event:')) eventName = line.slice(6).trim()
+      else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart())
+    }
+    for (const c of commentLines) controller.enqueue(encoder.encode(c + '\n\n'))
+    if (!dataLines.length) return
+    const rawData = dataLines.join('\n')
+    let ev
+    try {
+      ev = JSON.parse(rawData)
+    } catch {
+      controller.enqueue(encoder.encode(rawFrame + '\n\n'))
+      return
+    }
+    if (!ev || typeof ev !== 'object') {
+      controller.enqueue(encoder.encode(rawFrame + '\n\n'))
+      return
+    }
+    const emit = (kind, obj) => {
+      controller.enqueue(encoder.encode(`event: ${kind}\ndata: ${JSON.stringify(obj)}\n\n`))
+    }
+    if (ev.type === 'content_block_start' && ev.content_block && isServerToolBlock(ev.content_block.type)) {
+      const cb = ev.content_block
+      suppressed.add(ev.index)
+      collectedBlocks.push({ slot: nextMappedIndex, block: cb })
+      if (cb.type === 'server_tool_use') {
+        const input = cb.input && typeof cb.input === 'object' ? cb.input : {}
+        emitWebEvent(session, turn, 'activity', {
+          id: typeof cb.id === 'string' ? cb.id : '',
+          action: typeof input.action === 'string' ? input.action : '',
+          kind: typeof cb.kind === 'string' ? cb.kind : '',
+          queries: Array.isArray(input.queries) ? input.queries.filter(q => typeof q === 'string') : [],
+          url: typeof input.url === 'string' ? input.url : '',
+          pattern: typeof input.pattern === 'string' ? input.pattern : '',
+        })
+      } else {
+        recordSourcesFromBlock(cb)
+      }
+      return
+    }
+    if (ev.type === 'content_block_start') {
+      const mapped = nextMappedIndex++
+      indexMap.set(ev.index, mapped)
+      emit('content_block_start', { ...ev, index: mapped })
+      return
+    }
+    if (ev.type === 'content_block_delta') {
+      if (suppressed.has(ev.index)) return
+      if (ev.delta && ev.delta.type === 'citations_delta') {
+        const c = ev.delta.citation
+        if (c && typeof c.url === 'string' && c.url && !citationUrls.has(c.url)) {
+          citationUrls.add(c.url)
+          const known = sourcesByUrl.get(c.url)
+          const title = (typeof c.title === 'string' && c.title.trim()) ? c.title.trim() : (known?.title || '')
+          const site = known?.site || ''
+          const entry = { url: c.url, title, site }
+          citations.push(entry)
+          emitWebEvent(session, turn, 'citation', entry)
+        }
+        return
+      }
+      const mapped = indexMap.get(ev.index)
+      if (mapped !== undefined) emit('content_block_delta', { ...ev, index: mapped })
+      return
+    }
+    if (ev.type === 'content_block_stop') {
+      if (suppressed.has(ev.index)) return
+      const mapped = indexMap.get(ev.index)
+      if (mapped !== undefined) emit('content_block_stop', { ...ev, index: mapped })
+      return
+    }
+    if (ev.type === 'message_delta') {
+      const delta = ev.delta && typeof ev.delta === 'object' ? { ...ev.delta } : {}
+      if (typeof delta.title === 'string' && delta.title.trim()) {
+        emitWebEvent(session, turn, 'title', { title: delta.title.trim() })
+        delete delta.title
+      }
+      if (delta.stop_reason === 'refusal') {
+        flushCollected()
+        refused = true
+        emit('error', {
+          type: 'error',
+          error: { type: 'content_refusal', code: 'CONTENT_REFUSAL', message: 'Content review refused the response' },
+        })
+        return
+      }
+      emit('message_delta', { ...ev, delta })
+      return
+    }
+    if (ev.type === 'message_stop') {
+      if (refused) return
+      flushCollected()
+      emit('message_stop', ev)
+      return
+    }
+    if (ev.type === 'error') {
+      flushCollected()
+      emit('error', ev)
+      return
+    }
+    emit(eventName || ev.type, ev)
+  }
+
+  return bodyStream.pipeThrough(new TransformStream({
+    transform(chunk, controller) {
+      buffer += decoder.decode(chunk, { stream: true })
+      const sep = /\r?\n\r?\n/g
+      let last = 0
+      let match
+      while ((match = sep.exec(buffer)) !== null) {
+        const frame = buffer.slice(last, match.index)
+        last = sep.lastIndex
+        if (frame.length) processFrame(frame, controller)
+      }
+      if (last > 0) buffer = buffer.slice(last)
+    },
+    flush(controller) {
+      buffer += decoder.decode()
+      if (buffer.trim().length) processFrame(buffer, controller)
+      flushCollected()
+    },
+    cancel() {
+      flushCollected()
+    },
+  }))
+}
+
+async function* runInContext(storage, store, factory) {
+  const iter = storage.run(store, factory)[Symbol.asyncIterator]()
+  try {
+    while (true) {
+      const step = await storage.run(store, () => iter.next())
+      if (step.done) return step.value
+      yield step.value
+    }
+  } finally {
+    if (typeof iter.return === 'function') await storage.run(store, () => iter.return())
+  }
+}
+
 exports.name = 'phone-context'
 exports.inject = ['compaction', 'tokenMeter', 'commands', 'sessions', 'llm']
 exports.apply = function apply(ctx, config) {
   const pending = new WeakMap()
   const pictures = new WeakSet()
+  const activeSessions = new Map()
+  const webConfigs = new Map()
+  const activeTurns = new Map()
+  const llmContext = new AsyncLocalStorage()
+
+  function remember(agent) {
+    if (agent?.session?.id) activeSessions.set(agent.session.id, agent.session)
+  }
+
+  ctx.on('agent/disposed', ({ agent }) => {
+    const id = agent?.session?.id
+    if (!id) return
+    activeSessions.delete(id)
+    webConfigs.delete(id)
+    activeTurns.delete(id)
+  }, { global: true })
 
   ctx.on('agent/request', async ({agent, signal}, next) => {
+    remember(agent)
     const config = await next()
     if (!catalogModel(config.model)) {
       const info = await ctx.llm.resolveModelInfo(config.provider, config.model, signal)
@@ -129,23 +474,105 @@ exports.apply = function apply(ctx, config) {
     return config
   })
   ctx.on('agent/inbox/claimed', ({agent, message}) => {
+    remember(agent)
     if (message.content.some(b => b.type === 'image')) pictures.add(agent)
   })
   ctx.on('agent/turn-stopping', ({agent}) => {
     if (pictures.delete(agent)) offloadPhotos(agent.session)
   })
 
+  // Propagate exact LLM call metadata (sessionId, purpose) into our fetch interceptor so
+  // compaction and auxiliary title calls are never confused with conversation turns.
+  ctx.on('llm/stream', (options, next) => {
+    if (options.provider !== 'deepseek-account' || options.purpose !== undefined) return next()
+    const session = options.sessionId !== undefined ? activeSessions.get(String(options.sessionId)) : undefined
+    if (!session) return next()
+    return runInContext(llmContext, { sessionId: String(options.sessionId), session }, () => next())
+  }, { global: true })
+
+  // Intercept DeepSeek Messages requests only for active phone-chat conversation turns.
+  ctx.effect(() => {
+    const origFetch = globalThis.fetch
+    if (typeof origFetch !== 'function') return
+    const wrapped = async function phoneWebFetch(input, init) {
+      const store = llmContext.getStore()
+      const url = typeof input === 'string' ? input : (input instanceof URL ? input.href : input?.url || '')
+      if (!store || !init || init.method !== 'POST' || typeof init.body !== 'string' || !/\/messages(?:\?|$)/.test(url)) {
+        return origFetch.call(this, input, init)
+      }
+      let body
+      try {
+        body = JSON.parse(init.body)
+      } catch {
+        return origFetch.call(this, input, init)
+      }
+      const { sessionId, session } = store
+      const cfg = webConfigs.get(sessionId)
+      let mutated = false
+      if (Array.isArray(body.messages)) {
+        const before = body.messages.map(m => m.role === 'assistant' ? (m.content?.length ?? 0) : 0)
+        injectHistoryWebBlocks(session, body.messages)
+        if (body.messages.some((m, i) => m.role === 'assistant' && (m.content?.length ?? 0) !== before[i])) mutated = true
+      }
+      if (body.model === 'deepseek-flash' && cfg) {
+        const mode = cfg.mode
+        // DeepSeek forbids mixing other tools (such as DSH's default working_directory)
+        // with deepseek_web_search, deepseek_read_url, or title. Replace body.tools cleanly.
+        if (mode === 'search') {
+          body.tools = [
+            { type: 'deepseek_web_search', name: 'deepseek_web_search' },
+            { type: 'deepseek_read_url', name: 'deepseek_read_url' },
+          ]
+          mutated = true
+        } else if (mode === 'read') {
+          body.tools = [
+            { type: 'deepseek_read_url', name: 'deepseek_read_url' },
+          ]
+          mutated = true
+        } else if (cfg.wantTitle && Array.isArray(body.tools)) {
+          delete body.tools
+          mutated = true
+        }
+        // DeepSeek returns 400 if tool_choice names a web tool.
+        if (body.tool_choice && typeof body.tool_choice === 'object' &&
+            (body.tool_choice.name === 'deepseek_web_search' || body.tool_choice.name === 'deepseek_read_url')) {
+          delete body.tool_choice
+          mutated = true
+        }
+        if (cfg.wantTitle) {
+          body.title = { enabled: true }
+          mutated = true
+        }
+      }
+      const nextInit = mutated ? { ...init, body: JSON.stringify(body) } : init
+      const res = await origFetch.call(this, input, nextInit)
+      const contentType = res.headers?.get?.('content-type') || ''
+      if (!res.ok || !res.body || !contentType.includes('text/event-stream')) return res
+      const turnInfo = activeTurns.get(sessionId) || { turn: 0, step: 0 }
+      const transformed = transformWebSse(res.body, session, turnInfo.turn, turnInfo.step)
+      return new Response(transformed, { status: res.status, statusText: res.statusText, headers: res.headers })
+    }
+    globalThis.fetch = wrapped
+    return () => {
+      if (globalThis.fetch === wrapped) globalThis.fetch = origFetch
+    }
+  })
+
   // compactRegion requires an open turn. A private, empty inbox item opens a
   // DSH maintenance turn. Returning no messages closes it before an LLM step.
   // An orphaned marker after recovery is consumed without invoking the model.
   ctx.on('agent/pre-step', async ({agent, messages, signal, turn, step}, next) => {
+    remember(agent)
     const marker = messages.find(m => m.source.kind === MARKER || m.source.kind === RESTORE)
-    if (!marker) return next()
+    if (!marker) {
+      activeTurns.set(agent.session.id, { turn, step })
+      return next()
+    }
     const decision = await next()
     if (decision.kind !== 'enter') return decision
     const job = pending.get(agent)
     if (job && marker.id === job.id && marker.source.kind === RESTORE) {
-      const {role, content} = job.row
+      const {role, content, webBlocks} = job.row
       // The normal driver admits the persona before the first message. Use the
       // same preset scalar and the driver's own runtime-context proposal.
       if (!agent.session.surface.nodes.length) {
@@ -155,14 +582,23 @@ exports.apply = function apply(ctx, config) {
       }
       const source = role === 'user' ? {kind: 'phone-history'} : {kind: 'model', provider: 'phone-local', model: 'transcript'}
       const message = {id: job.id, role, content, source}
+      let assistantSeq = -1
       const event = role === 'user'
         ? agent.session.append('user/message', message, {surfaceOp: 'append'})
-        : agent.session.append([
-          ['step/start', {turn, step}],
-          ['assistant/message', {turn, step, message, stream: []}, {surfaceOp: 'append'}],
-          ['step/end', {turn, step}],
-        ])[2]
+        : (() => {
+          const batch = agent.session.append([
+            ['step/start', {turn, step}],
+            ['assistant/message', {turn, step, message, stream: []}, {surfaceOp: 'append'}],
+            ['step/end', {turn, step}],
+          ])
+          assistantSeq = batch[1].seq
+          return batch[2]
+        })()
       job.seq = event.seq
+      if (role === 'assistant' && assistantSeq >= 0 && Array.isArray(webBlocks) && webBlocks.length) {
+        const saved = emitWebEvent(agent.session, turn, 'blocks', { assistantSeq, blocks: webBlocks })
+        if (saved) job.seq = saved.seq
+      }
       for (const reminder of decision.messages.filter(m => m.source.kind === 'runtime-context')) {
         job.seq = agent.session.append('user/message', reminder, {surfaceOp: 'append'}).seq
       }
@@ -181,8 +617,61 @@ exports.apply = function apply(ctx, config) {
   }, { prepend: true })
 
   ctx.effect(() => ctx.commands.register({
+    definitionId: 'phone-web', name: 'phone-web', recordInput: false, description: '联网配置',
+    handler({agent, rawInput}) {
+      remember(agent)
+      try {
+        const arg = JSON.parse(rawInput)
+        if (!['search', 'read', 'off'].includes(arg.mode)) return {kind: 'error', text: '参数错误'}
+        webConfigs.set(agent.session.id, { mode: arg.mode, wantTitle: Boolean(arg.title) })
+        return {kind: 'success', text: 'ok'}
+      } catch {
+        return {kind: 'error', text: '参数错误'}
+      }
+    },
+  }))
+
+  // Fallback title generator for models that do not support the top-level `title` parameter.
+  ctx.effect(() => ctx.commands.register({
+    definitionId: 'phone-title', name: 'phone-title', recordInput: false, description: '生成标题',
+    async handler({agent, rawInput, signal}) {
+      try {
+        const arg = JSON.parse(rawInput)
+        const transcript = typeof arg.transcript === 'string' ? arg.transcript.trim() : ''
+        if (!transcript) return {kind: 'error', text: '参数错误'}
+        const call = await ctx.llm.prepareCall(
+          { provider: 'deepseek-account', model: 'deepseek-flash', maxTokens: 32, reasoningEffort: 'off' },
+          signal,
+        )
+        const stream = call.stream({
+          ...call.config,
+          system: 'Generate a concise conversation title. Use Chinese if the chat is Chinese (at most 12 characters) or English (at most 6 words). Return only the title with no quotes or trailing punctuation.',
+          messages: [{
+            id: 'phone-title-' + Date.now(),
+            role: 'user',
+            content: [{ type: 'text', text: transcript }],
+            source: { kind: 'phone-title' },
+          }],
+          sessionId: agent.session.id,
+          purpose: 'phone-title',
+          signal,
+        })
+        let text = ''
+        for await (const chunk of stream) {
+          if (chunk.type === 'text-delta') text += chunk.text
+        }
+        text = text.trim()
+        return text ? {kind: 'success', text} : {kind: 'error', text: '空标题'}
+      } catch {
+        return {kind: 'error', text: '生成失败'}
+      }
+    },
+  }))
+
+  ctx.effect(() => ctx.commands.register({
     definitionId: 'phone-locate', name: 'phone-locate', recordInput: false, description: '定位存档',
     handler({agent, rawInput}) {
+      remember(agent)
       const expected = JSON.parse(rawInput)
       return {kind: 'success', text: JSON.stringify(legacyCuts(agent.session, expected))}
     },
@@ -193,10 +682,12 @@ exports.apply = function apply(ctx, config) {
   ctx.effect(() => ctx.commands.register({
     definitionId: RESTORE, name: RESTORE, recordInput: false, description: '恢复分支',
     async handler({agent, rawInput, signal, commandId}) {
+      remember(agent)
       if (pending.has(agent)) return {kind: 'error', text: '正在处理'}
       const row = JSON.parse(rawInput)
       if (!['user', 'assistant'].includes(row.role) || !Array.isArray(row.content) || !row.content.length ||
           !row.content.every(b => b.type === 'text' && typeof b.text === 'string')) return {kind: 'error', text: '参数错误'}
+      if (row.webBlocks !== undefined && !Array.isArray(row.webBlocks)) return {kind: 'error', text: '参数错误'}
       const job = {id: commandId, row}
       pending.set(agent, job)
       try {
@@ -217,6 +708,7 @@ exports.apply = function apply(ctx, config) {
     definitionId: 'phone-context', name: 'phone-context', recordInput: false,
     description: '压缩上下文',
     async handler({agent, rawInput, signal, commandId}) {
+      remember(agent)
       const input = rawInput.trim()
       const manual = input === 'manual'
       const files = /^files (\d+) (\d+) ([0-4])(?: (\d+))?$/.exec(input)
