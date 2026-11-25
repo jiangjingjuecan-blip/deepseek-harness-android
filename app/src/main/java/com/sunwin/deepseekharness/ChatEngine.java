@@ -26,13 +26,14 @@ final class ChatEngine {
     synchronized long delete(long id,long current) {
         History.Chat chat=app.history.chat(id);
         if (chat==null) return current;
+        List<String> sessions=app.history.sessions(id);
         long next=app.history.delete(id,current,app.log);
         app.imports.cancel(id);
         if (active!=null && active.chat.id==id) {
             if (active.socket!=null) active.socket.cancel();
             active=null;
         }
-        archive(app.api,chat.remote);
+        for (String session:sessions) archive(app.api,session);
         return next;
     }
     private void archive(Loopback api,String session) {
@@ -46,11 +47,11 @@ final class ChatEngine {
     }
     private synchronized boolean link(Work work,String session) {
         if (active!=work) return false;
-        app.history.link(work.chat.id,session);
+        app.history.linkBranch(work.chat.branch,session);
         return true;
     }
     private synchronized void meter(Work work,ContextUsage usage) {
-        if (active==work) app.history.meter(work.chat.id,work.model,usage);
+        if (active==work) app.history.meterBranch(work.chat.branch,work.model,usage);
     }
     private synchronized void savePartial(Work work,long row,String body) {
         if (active==work) app.history.update(row,body,"pending");
@@ -65,22 +66,125 @@ final class ChatEngine {
         app.changed();
     }
     synchronized boolean send(long chatId,String text,List<Attachment> files) {
+        if (!ready(chatId) || Attachment.photos(files)>Attachment.MAX_PHOTOS || Attachment.documents(files)>Attachment.MAX_DOCUMENTS) return false;
+        History.Chat chat=app.history.chat(chatId);
+        if (text.isEmpty() && files.isEmpty() && app.history.diceBefore(chat.branch,Long.MAX_VALUE).isEmpty()) return false;
+        return generate(chatId,()->app.history.begin(chatId,text,files),false);
+    }
+    synchronized boolean regenerate(long chat,long message) {
+        return ready(chat) && generate(chat,()->app.history.regenerate(chat,message),true);
+    }
+    synchronized boolean answerUser(long chat,long user) {
+        return ready(chat) && generate(chat,()->app.history.answerUser(chat,user),true);
+    }
+    private boolean ready(long chat) {
+        return !busy() && !app.imports.busy(chat) && app.api!=null && app.account.stored && !app.account.selected.isEmpty();
+    }
+    private boolean generate(long chatId,java.util.function.LongSupplier insert,boolean fresh) {
         Loopback api=app.api;
-        String model=app.account.selected;
-        if (busy() || app.imports.busy(chatId) || api==null || !app.account.stored || model.isEmpty() || (text.isEmpty() && files.isEmpty())
-                || Attachment.photos(files)>Attachment.MAX_PHOTOS || Attachment.documents(files)>Attachment.MAX_DOCUMENTS) return false;
-        List<Attachment> attachments=new ArrayList<>(files);
-        long row;
-        try { row=app.history.begin(chatId,text,attachments); }
-        catch (android.database.sqlite.SQLiteException e) {
+        try {
+            long row=insert.getAsLong();
+            Work work=new Work(app.history.chat(chatId),app.account.selected);
+            long branch=work.chat.branch;
+            History.Message user=app.history.at(branch,app.history.last(branch,row));
+            String text=app.history.promptText(branch,user);
+            active=work; app.changed();
+            io.execute(() -> run(api,work,row,user,text,fresh));
+            return true;
+        } catch (android.database.sqlite.SQLiteException e) {
             ChatFailure failure=ChatFailure.caught(e,SAVE_REPLY);
             app.log.interrupted(SAVE_REPLY,failure); app.notice(failure.getMessage()); return false;
         }
-        Work work=new Work(app.history.chat(chatId),model);
-        active=work;
-        app.changed();
-        io.execute(() -> run(api,work,row,text,attachments));
-        return true;
+    }
+    private synchronized boolean track(Work work,String remote) {
+        if (active!=work) return false;
+        app.history.trackSession(work.chat.id,remote); return true;
+    }
+    private synchronized void anchor(Work work,long id,String remote,long seq) {
+        if (active==work) app.history.anchor(id,remote,seq);
+    }
+    private static String digest(String text) throws java.security.NoSuchAlgorithmException {
+        byte[] bytes=java.security.MessageDigest.getInstance("SHA-256").digest(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        StringBuilder hex=new StringBuilder(64);
+        for (byte b:bytes) { hex.append(Character.forDigit((b & 255)>>>4,16)); hex.append(Character.forDigit(b & 15,16)); }
+        return hex.toString();
+    }
+    private void locateLegacy(Loopback api,Work work,List<History.Message> prefix,int count) throws Exception {
+        String remote=prefix.get(count-1).session;
+        JSONArray expected=new JSONArray();
+        for (int i=0;i<count;i++) {
+            History.Message m=prefix.get(i);
+            if (!"done".equals(m.state) || !remote.equals(m.session)) break;
+            expected.put(new JSONArray().put(m.role).put(m.text.isEmpty() ? JSONObject.NULL : digest(m.text)));
+        }
+        if (expected.length()==0) return;
+        JSONObject reply;
+        try {
+            reply=api.rpc("commands/execute",Wire.obj("agentId",remote,"line","/phone-locate "+expected,"submittedAttachments",new JSONArray()));
+        } catch (ChatFailure e) {
+            if ("session/not-found".equals(e.code) || "gateway/context-not-found".equals(e.code)) return;
+            throw e;
+        }
+        JSONObject result=reply==null ? null : reply.optJSONObject("result");
+        if (result==null || !"success".equals(result.optString("kind"))) return;
+        JSONArray cuts=new JSONArray(result.getString("text"));
+        if (cuts.length()>expected.length()) throw new ChatFailure("存档位置无效");
+        synchronized (this) {
+            if (active!=work) throw new ChatFailure("已取消");
+            android.database.sqlite.SQLiteDatabase db=app.history.getWritableDatabase(); db.beginTransaction();
+            try {
+                for (int i=0;i<cuts.length();i++) app.history.anchor(prefix.get(i).id,remote,cuts.getLong(i));
+                db.setTransactionSuccessful();
+            } finally { db.endTransaction(); }
+        }
+    }
+    // Resolve only the immutable prefix before the new input. A compacted sibling
+    // can keep changing: the inclusive journal seq of our fork never moves.
+    private String session(Loopback api,Work work,long through,boolean fresh) throws Exception {
+        if (!fresh && !work.chat.dirty && work.chat.remote!=null) return work.chat.remote;
+        List<History.Message> prefix=app.history.line(work.chat.branch,0,through);
+        int tail=prefix.size();
+        while (tail>0 && prefix.get(tail-1).session==null) tail--;
+        if (tail>0 && prefix.get(tail-1).seq<0) {
+            locateLegacy(api,work,prefix,tail);
+            prefix=app.history.line(work.chat.branch,0,through);
+            tail=prefix.size();
+            while (tail>0 && prefix.get(tail-1).seq<0) tail--;
+        }
+        JSONObject created=null;
+        if (tail>0) {
+            History.Message cut=prefix.get(tail-1);
+            try {
+                created=api.rpc("session/fork",Wire.request(Wire.obj("sessionId",cut.session,"atSeq",cut.seq)));
+            } catch (ChatFailure e) {
+                if (!"session/not-found".equals(e.code) && !"session/fork-unavailable".equals(e.code)) throw e;
+                tail=0;
+            }
+        }
+        if (created==null) created=api.rpc("session/create",Wire.request(Wire.obj("cwd",cwd,"agentPreset","phone-chat")));
+        String remote=created==null ? "" : created.optString("sessionId");
+        if (remote.isEmpty()) throw new ChatFailure("DSH 未返回会话标识");
+        if (!track(work,remote)) { archive(api,remote); throw new ChatFailure("已取消"); }
+        // Select the route before restoring. Each private maintenance turn consumes its
+        // empty marker before the model step and keeps the original user/assistant role.
+        if (tail<prefix.size()) select(api,remote,work.model);
+        for (int i=tail;i<prefix.size();i++) {
+            if (active!=work) throw new ChatFailure("已取消");
+            History.Message m=prefix.get(i);
+            if ("dice".equals(m.role)) continue;  // Injected exactly once with the following user row.
+            String body="user".equals(m.role) ? app.history.promptText(work.chat.branch,m) : m.text;
+            JSONArray parts=Wire.parts(app,body,m.attachments,m.fileBytes<0 ? ContextUsage.MAX_FILE_BYTES : m.fileBytes,
+                    m.imageSlots<0 ? Attachment.documentImageSlots(m.attachments) : m.imageSlots,true);
+            if (parts.length()==0) continue; // Empty interrupted reply has no model-visible content.
+            JSONObject value=api.rpc("commands/execute",Wire.obj("agentId",remote,"line","/phone-restore "+Wire.obj("role",m.role,"content",parts),
+                    "submittedAttachments",new JSONArray()));
+            JSONObject result=value==null ? null : value.optJSONObject("result");
+            if (result==null || !"success".equals(result.optString("kind")) || !result.optString("text").matches("[0-9]{1,15}"))
+                throw new ChatFailure("分支恢复失败");
+            anchor(work,m.id,remote,Long.parseLong(result.getString("text")));
+        }
+        if (!link(work,remote)) throw new ChatFailure("已取消");
+        return remote;
     }
     private void select(Loopback api,String session,String model) throws Exception {
         api.rpc("session/selectModel",Wire.request(Wire.obj("sessionId",session,"provider","deepseek-account","model",model)));
@@ -90,13 +194,13 @@ final class ChatEngine {
         String model=app.account.selected;
         if (busy()) { app.notice("正在处理"); return; }
         Work work=new Work(app.history.chat(chatId),model);
-        String session=work.chat.remote;
-        if (session==null) { app.notice("无需压缩"); return; }
+        if (work.chat.remote==null && app.history.last(work.chat.branch,Long.MAX_VALUE)==0) { app.notice("无需压缩"); return; }
         if (api==null || !app.account.stored || model.isEmpty()) { app.notice("未连接"); return; }
         active=work; app.changed();
         io.execute(()->{
             try {
                 if (active!=work) return;
+                String session=session(api,work,Long.MAX_VALUE,false);
                 select(api,session,model);
                 if (active!=work) return;
                 ContextUsage usage=ContextUsage.prepare(api,session,"manual");
@@ -110,7 +214,8 @@ final class ChatEngine {
             } finally { finish(work); }
         });
     }
-    private void run(Loopback api,Work work,long row,String text,List<Attachment> files) {
+    private void run(Loopback api,Work work,long row,History.Message user,String text,boolean fresh) {
+        List<Attachment> files=user.attachments;
         String requestId=UUID.randomUUID().toString();
         Reply reply=new Reply(requestId);
         WebSocket socket=null;
@@ -121,13 +226,7 @@ final class ChatEngine {
         ContextUsage prepared=null;
         try {
             if (active!=work) return;
-            if (session==null) {
-                JSONObject created=api.rpc("session/create",Wire.request(Wire.obj("cwd",cwd,"agentPreset","phone-chat")));
-                if (created==null || !(created.opt("sessionId") instanceof String) || created.getString("sessionId").isEmpty())
-                    throw new ChatFailure("DSH 未返回会话标识");
-                session=created.getString("sessionId");
-                if (!link(work,session)) { archive(api,session); return; }
-            }
+            session=session(api,work,user.id-1,fresh);
             stage=SELECT_MODEL;
             select(api,session,work.model);
             stage=CONTEXT;
@@ -137,7 +236,13 @@ final class ChatEngine {
             meter(work,prepared);
             app.changed();
             stage=READ_ATTACHMENT;
-            JSONObject prompt=Wire.prompt(app,session,requestId,text,files,prepared.fileBytes,prepared.documentImages);
+            int bytes=user.fileBytes<0 ? prepared.fileBytes : Math.min(user.fileBytes,prepared.fileBytes);
+            int images=user.imageSlots<0 ? prepared.documentImages : Math.min(user.imageSlots,prepared.documentImages);
+            JSONObject prompt=Wire.prompt(app,session,requestId,text,files,bytes,images);
+            synchronized (this) {
+                if (active!=work) return;
+                app.history.allowance(user.id,bytes,images);
+            }
             Feed feed=new Feed(Wire.follow(session).toString());
             stage=FOLLOW;
             socket=follow(work,api,feed);
@@ -183,7 +288,7 @@ final class ChatEngine {
             }
         } finally {
             if (socket!=null) socket.close(1000,"");
-            saveReply(work,row,reply,failure,stage,prepared,draft);
+            saveReply(work,row,user.id,session,reply,failure,stage,prepared,draft);
             app.changed();
             if (active==work && reply.active() && api==app.api) {
                 try { api.rpc("session/cancel",Wire.request(Wire.obj("sessionId",session))); }
@@ -192,20 +297,27 @@ final class ChatEngine {
             finish(work);
         }
     }
-    private synchronized void saveReply(Work work,long row,Reply reply,ChatFailure failure,
+    private synchronized void saveReply(Work work,long row,long user,String session,Reply reply,ChatFailure failure,
                                         ChatFailure.Stage stage,ContextUsage prepared,long draft) {
         if (active!=work) return;
         try {
-            if (failure==null && reply.completed) {
-                app.history.update(row,reply.body(),"done");
-                if (reply.contextTokens<0 && prepared!=null) meter(work,
-                        new ContextUsage(prepared.used+draft+ContextUsage.estimate(reply.body(),Collections.emptyList()),prepared.window,false));
-                app.log.add(CHAT_COMPLETE);
-            } else {
-                if (failure==null) failure=new ChatFailure("DSH 回合未结束");
-                app.log.interrupted(stage,failure);
-                app.history.update(row,reply.body(),"interrupted",failure.getMessage());
-            }
+            android.database.sqlite.SQLiteDatabase db=app.history.getWritableDatabase(); db.beginTransaction();
+            try {
+                if (session!=null) anchor(work,user,session,reply.userSeq);
+                if (failure==null && reply.completed) {
+                    anchor(work,row,session,reply.endSeq);
+                    app.history.update(row,reply.body(),"done");
+                    if (reply.contextTokens<0 && prepared!=null) meter(work,
+                            new ContextUsage(prepared.used+draft+ContextUsage.estimate(reply.body(),Collections.emptyList()),prepared.window,false));
+                    app.log.add(CHAT_COMPLETE);
+                } else {
+                    if (failure==null) failure=new ChatFailure("DSH 回合未结束");
+                    app.log.interrupted(stage,failure);
+                    app.history.dirty(work.chat.branch);
+                    app.history.update(row,reply.body(),"interrupted",failure.getMessage());
+                }
+                db.setTransactionSuccessful();
+            } finally { db.endTransaction(); }
         } catch (android.database.sqlite.SQLiteException e) {
             ChatFailure storage=ChatFailure.caught(e,SAVE_REPLY);
             app.log.interrupted(SAVE_REPLY,storage); app.notice(storage.getMessage());

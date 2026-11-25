@@ -1,5 +1,7 @@
 # 手机对话的上下文预算
 
+0.1.6 起，计量和摘要以当前分支的 DSH 会话为单位。发送时计入该线路选中的回复版本、文档和本轮骰点。从旧消息分支会使用当时的消息前缀。[文游存档与分支](ADVENTURE.md)
+
 本次核对的可执行文件来自随 APK 锁定的 DSH 0.2.2-rc.2 wheel。下列源码链接固定在同版提交 `ddac9676`。2026-11-24 在已登录的盒子上读取了 `session/modelCatalog`。账号组返回模型 ID、显示名和推理选项，容量需要从适配器取得。[运行时锁文件](../tools/runtime.lock.json) · [官方模型定义](https://github.com/deepseek-ai/deepseek-harness/blob/ddac9676/packages/llm/llm-deepseek/src/models.ts#L4-L23)
 
 ## 模型与预算

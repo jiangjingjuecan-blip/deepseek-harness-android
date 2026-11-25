@@ -43,6 +43,11 @@ final class DeviceContext {
             onUi(()->{
                 click("历史对话"); click("新建对话");
             });
+            if ("adventure-ui".equals(mode)) {
+                DeviceAdventure adventure=new DeviceAdventure(test,activity);
+                try { adventure.run(); } finally { stage=adventure.stage; }
+                return;
+            }
             if ("attachments".equals(mode)) {
                 DeviceAttachments attachments=new DeviceAttachments(test,activity);
                 try { attachments.send(); } finally { stage=attachments.stage; }

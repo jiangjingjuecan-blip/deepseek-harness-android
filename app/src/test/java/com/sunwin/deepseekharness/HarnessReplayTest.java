@@ -101,7 +101,7 @@ public class HarnessReplayTest {
         }
     }
     private void deleteLinkedChat(HarnessApp app,ChatEngine chat,Loopback api,long id) throws Exception {
-        String session=app.history.chat(id).remote;
+        Set<String> expected=new HashSet<>(app.history.sessions(id));
         BlockingQueue<String> frames=new LinkedBlockingQueue<>();
         WebSocket ws=api.follow(new WebSocketListener() {
             @Override public void onOpen(WebSocket socket,Response response) {
@@ -117,11 +117,14 @@ public class HarnessReplayTest {
             long next=chat.delete(id,id);
             assertNull(app.history.chat(id));
             assertTrue(app.history.messages(next).isEmpty());
-            JSONObject change=workspaceFrame(frames);
-            assertEquals("archived",change.getString("type"));
-            JSONArray ids=change.getJSONArray("archivedSessionIds");
-            assertEquals(1,ids.length());
-            assertEquals(session,ids.getString(0));
+            Set<String> archived=new HashSet<>();
+            while (!archived.containsAll(expected)) {
+                JSONObject change=workspaceFrame(frames);
+                assertEquals("archived",change.getString("type"));
+                JSONArray ids=change.getJSONArray("archivedSessionIds");
+                for (int i=0;i<ids.length();i++) archived.add(ids.getString(i));
+            }
+            assertEquals(expected,archived);
 
             long missing=app.history.create();
             app.history.link(missing,"missing-fixture-session");

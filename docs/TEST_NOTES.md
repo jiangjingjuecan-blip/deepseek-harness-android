@@ -1,5 +1,13 @@
 # 安卓安装包验证
 
+## v0.1.6-test
+
+- ARM64 签名 APK 为 **134,334,570 字节（128.11 MiB）**，SHA-256 为 `d236bf23b8ade4d8b5454ea720b69bcd1b7e2b7ae725984ff8aa85879c360487`。包名 `com.sunwin.deepseekharness`，versionCode 7，versionName 0.1.6。APK v2 签名和 ZIP 对齐检查通过。与 v0.1.0-test 至 v0.1.5-test 的六份公开包逐个核对，签名证书 SHA-256 均为 `b849e51b4f5a8691ffca6eecbae2592fc28afe06acccc148c52b67f2abc2079e`。[下载 APK](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/download/v0.1.6-test/deepseek-harness-test.apk)
+- 宿主机分别以 `HARNESS_REPLAY=x86_64` 和 `HARNESS_REPLAY=arm64-v8a` 运行发布版测试。两组均为 **48 项通过，0 项跳过**，包括官方 DSH 0.2.2-rc.2 协议回放、SQLite 和附件测试。本地接收端逐轮检查系统前缀、正文角色顺序、骰子块、三个生成版本、编辑后的续聊，以及重发照片的内容标识。手动压缩子线后，主线仍发送完整的原文。另测了旧日志定位、缺失日志的本地恢复、分支草稿、删除文件与存档，以及七种骰子的范围和分布。[文游协议回放](../app/src/test/java/com/sunwin/deepseekharness/AdventureReplayTest.java) · [存储与升级测试](../app/src/test/java/com/sunwin/deepseekharness/AdventureHistoryTest.java) · [骰子测试](../app/src/test/java/com/sunwin/deepseekharness/DiceTest.java)
+- 在 Android 10（API 29）ARM64 模拟器 `harnessarm` 上，先在 0.1.5 的 SQLite 6 写入照片、回复、DSH 标识和用量，再覆盖安装 0.1.6。设备内 APK 摘要与交付文件相同。界面仪器测试读回升级前的数据，长按存档，掷 d20，重生成并来回翻页，分别编辑用户和 AI 消息，回到主线后从存档开出另一条线。ADB 回环连接隔离的官方 ARM64 DSH，接收端核对六次正文请求中的版本与骰点，返回 `passed=adventure-ui`。[模拟器文游测试](../app/src/androidTest/java/com/sunwin/deepseekharness/DeviceAdventure.java)
+- 同一安装包通过历史长按删除测试（`passed=delete`）。附件界面回放首次运行时，模型夹具已收到照片与文档，随后模拟器的 Android 10 ART JIT 编译线程发生 SIGSEGV。保留默认 JIT，在新进程重跑得到 `passed=attachments`，核对了多图、文档正文、点第二个图号打开对应图片以及滑动和缩放。再启动独立进程读回这些附件，得到 `passed=attachments-reopen`。[附件界面测试](../app/src/androidTest/java/com/sunwin/deepseekharness/DeviceAttachments.java)
+- 本版测试使用本地账号和推理夹具，真实账号模型调用 **0 次**。本轮设备验证仅使用模拟器。[回放入口](../tools/replay.py)
+
 ## v0.1.5-test
 
 ### 内嵌图片更新

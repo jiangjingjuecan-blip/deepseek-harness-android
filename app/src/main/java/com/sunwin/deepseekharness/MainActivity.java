@@ -36,12 +36,13 @@ public final class MainActivity extends Activity {
     private List<Attachment> draftFiles=Collections.emptyList();
     private List<Long> shownDraft;
     private HorizontalScrollView attachmentScroll;
-    private long chatId, photoChat;
+    private long chatId, photoChat, photoBranch, draftBranch, tailUser, lastAssistant;
+    private boolean pendingDice;
     private String screen="chat", draft="", cameraPath;
     private boolean openLogin, visible;
     private LinearLayout root, content, thread, intro, attachment;
     private ScrollView scroll;
-    private TextView header, subtitle, meter;
+    private TextView header, subtitle, meter, branchButton;
     private EditText input;
     private ImageButton send;
     private final HashMap<Long,TextView> bubbles=new HashMap<>();
@@ -56,9 +57,10 @@ public final class MainActivity extends Activity {
             List<History.Chat> items=app.history.list();
             choose(items.isEmpty()?app.history.create():items.get(0).id);
         }
+        draftBranch=app.history.chat(chatId).branch; draft=app.history.textDraft(draftBranch);
         if (state!=null) {
-            screen=state.getString("screen","chat"); draft=state.getString("draft","");
-            cameraPath=state.getString("camera"); photoChat=state.getLong("photoChat");
+            screen=state.getString("screen","chat"); if (state.getLong("draftBranch")==draftBranch) draft=state.getString("draft","");
+            cameraPath=state.getString("camera"); photoChat=state.getLong("photoChat"); photoBranch=state.getLong("photoBranch");
             openLogin=state.getBoolean("launch");
         }
         startRuntime(); draw();
@@ -83,11 +85,11 @@ public final class MainActivity extends Activity {
     @Override public void onResume() {
         super.onResume(); visible=true; app.listen(this::update); app.account.refresh(false); update();
     }
-    @Override public void onPause() { visible=false; app.listen(null); super.onPause(); }
+    @Override public void onPause() { app.history.textDraft(draftBranch,draft); visible=false; app.listen(null); super.onPause(); }
     @Override public void onDestroy() { files.shutdown(); thumbnails.shutdownNow(); super.onDestroy(); }
     @Override public void onSaveInstanceState(Bundle b) {
         super.onSaveInstanceState(b);
-        b.putString("screen",screen); b.putString("draft",draft);
+        b.putLong("draftBranch",draftBranch); b.putLong("photoBranch",photoBranch); b.putString("screen",screen); b.putString("draft",draft);
         b.putString("camera",cameraPath); b.putLong("photoChat",photoChat); b.putBoolean("launch",openLogin);
     }
     @Override public void onBackPressed() {
@@ -95,7 +97,7 @@ public final class MainActivity extends Activity {
     }
     private void choose(long id) { chatId=id; preferences().edit().putLong("chat",id).apply(); }
     private void selectChat(long id) {
-        if (id!=chatId) { draft=""; choose(id); }
+        if (id!=chatId) choose(id);
         go("chat");
     }
     private void go(String page) {
@@ -103,6 +105,10 @@ public final class MainActivity extends Activity {
         screen=page; draw();
     }
     private void draw() {
+        long selected=app.history.chat(chatId).branch;
+        if (draftBranch!=selected) {
+            app.history.textDraft(draftBranch,draft); draftBranch=selected; draft=app.history.textDraft(selected);
+        }
         input=null; send=null; introKey=""; bubbles.clear();
         root=a.column(); root.setBackgroundColor(PAPER); root.setFocusableInTouchMode(true);
         setContentView(root);
@@ -114,6 +120,8 @@ public final class MainActivity extends Activity {
         titles.addView(header); subtitle=a.text("",12,DIM,false); titles.addView(subtitle);
         bar.addView(titles,new LinearLayout.LayoutParams(0,-1,1));
         if (chat) {
+            branchButton=a.button("分支",false,this::showBranches); a.buttonStyle(branchButton,PAPER,14);
+            a.pad(branchButton,2,0); branchButton.setContentDescription("分支"); bar.addView(branchButton,a.size(52,44));
             meter=a.text("",12,DIM,false); meter.setGravity(Gravity.CENTER);
             a.buttonStyle(meter,PAPER,14); meter.setTooltipText("压缩上下文");
             meter.setOnClickListener(v->{
@@ -141,7 +149,9 @@ public final class MainActivity extends Activity {
             case "history": header.setText("历史对话"); break;
             case "settings": header.setText("设置"); showSettings(); break;
             default:
-                History.Chat chat=app.history.chat(chatId); header.setText(chat.title);
+                History.Chat chat=app.history.chat(chatId);
+                if (chat.branch!=draftBranch) { draw(); return; }
+                header.setText(chat.title); branchButton.setText(chat.number==1 ? "分支" : "分支 "+chat.number);
                 String percent=app.history.meter(chatId,app.account.selected).percent();
                 meter.setText(percent); meter.setContentDescription("上下文用量 "+percent);
                 Loopback api=app.api;
@@ -184,12 +194,19 @@ public final class MainActivity extends Activity {
         for (ImageButton b:new ImageButton[]{gallery,camera}) { a.buttonStyle(b,WHITE,12); tools.addView(b,a.size(48,48)); }
         TextView file=a.button("文件",false,this::documents);
         a.buttonStyle(file,WHITE,12); a.pad(file,6,0); tools.addView(file,a.size(48,48));
+        TextView dice=a.button("骰子",false,this::diceMenu); a.buttonStyle(dice,WHITE,12); a.pad(dice,2,0);
+        tools.addView(dice,a.size(44,48));
         tools.addView(new View(this),new LinearLayout.LayoutParams(0,1,1));
         send=a.icon(R.drawable.ic_send,"发送",this::send); a.buttonStyle(send,BLUE,15); send.setColorFilter(WHITE);
         tools.addView(send,a.size(48,46));
     }
     private void renderMessages() {
         List<History.Message> rows=app.history.messages(chatId);
+        History.Message tail=rows.isEmpty() ? null : rows.get(rows.size()-1);
+        tailUser=tail!=null && "user".equals(tail.role) ? tail.id : 0;
+        pendingDice=tail!=null && "dice".equals(tail.role);
+        lastAssistant=0;
+        for (History.Message row:rows) if ("assistant".equals(row.role)) lastAssistant=row.id;
         intro.setVisibility(rows.isEmpty()?View.VISIBLE:View.GONE);
         if (rows.isEmpty()) {
             String key=status()+"|"+app.account.stored;
@@ -216,14 +233,30 @@ public final class MainActivity extends Activity {
                 LinearLayout group=a.column(); group.setGravity(user?Gravity.END:Gravity.START);
                 LinearLayout.LayoutParams gp=a.size(-1,-2); gp.bottomMargin=a.dp(16);
                 if (user) gp.leftMargin=a.dp(34); else gp.rightMargin=a.dp(18); thread.addView(group,gp);
-                if (!user) { group.addView(a.text("DeepSeek",12,DIM,true)); a.gap(group,5); }
+                LinearLayout actions=a.row(); group.addView(actions,a.size(-2,-2));
+                boolean dice="dice".equals(m.role);
+                if (!user) actions.addView(a.text(dice?"骰子":"DeepSeek",12,DIM,true));
+                if (m.saved) { TextView mark=a.text("存档",12,BLUE,true); a.pad(mark,5,0); actions.addView(mark); }
+                if (m.versions>1) {
+                    versionArrow(actions,m,-1);
+                    actions.addView(a.text(m.version+"/"+m.versions,12,DIM,false));
+                    versionArrow(actions,m,1);
+                }
+                TextView more=a.button("⋯",false,()->messageMenu(m.id));
+                more.setContentDescription("消息操作"); a.buttonStyle(more,PAPER,10); a.pad(more,2,0);
+                actions.addView(more,a.size(36,32));
+                group.setOnLongClickListener(v->{ messageMenu(m.id); return true; });
                 if (!m.attachments.isEmpty()) messageFiles(group,m.attachments);
                 body=a.text("",16,INK,false); body.setTextIsSelectable(true);
-                if (user) { body.setBackground(a.shape(PALE,17,0)); a.pad(body,14,11); }
+                body.setOnLongClickListener(v->{ messageMenu(m.id); return true; });
+                if (user || dice) { body.setBackground(a.shape(PALE,17,0)); a.pad(body,14,11); }
                 else a.pad(body,0,3);
                 group.addView(body,a.size(-2,-2)); bubbles.put(m.id,body);
             }
             String text=m.text;
+            if ("dice".equals(m.role) && text.startsWith("[骰子 ") && text.endsWith("]"))
+                text=text.substring(4,text.length()-1).replace(" | ","  ·  ");
+            if ("user".equals(m.role) && text.isEmpty() && m.attachments.isEmpty()) text="判定";
             if ("pending".equals(m.state) && text.isEmpty()) text="正在回复…";
             if ("interrupted".equals(m.state)) {
                 String reason=TextUtils.isEmpty(m.error)?"回复已中断":m.error;
@@ -236,7 +269,7 @@ public final class MainActivity extends Activity {
     }
     private void updateSend() {
         if (send==null) return;
-        boolean can=!app.chat.busy() && !app.imports.busy(chatId) && (!draft.trim().isEmpty() || !draftFiles.isEmpty());
+        boolean can=!app.chat.busy() && !app.imports.busy(chatId) && (!draft.trim().isEmpty() || !draftFiles.isEmpty() || pendingDice || tailUser!=0);
         send.setEnabled(can); send.setAlpha(can?1f:.44f);
     }
     private void send() {
@@ -246,7 +279,90 @@ public final class MainActivity extends Activity {
             toast(app.account.modelError.isEmpty() ? "正在获取可用模型" : app.account.modelError);
             app.account.refresh(true); return;
         }
-        if (app.chat.send(chatId,draft.trim(),app.history.draft(chatId))) { input.setText(""); update(); }
+        boolean answering=tailUser!=0 && draft.trim().isEmpty() && draftFiles.isEmpty();
+        boolean sent=answering ? app.chat.answerUser(chatId,tailUser) : app.chat.send(chatId,draft.trim(),app.history.draft(chatId));
+        if (sent) { input.setText(""); app.history.textDraft(draftBranch,""); update(); }
+    }
+    private void versionArrow(LinearLayout row,History.Message m,int direction) {
+        TextView arrow=a.button(direction<0?"‹":"›",false,()->{
+            long id=app.history.switchVersion(chatId,m.id,direction); draw(); jump(id);
+        });
+        boolean enabled=direction<0 ? m.version>1 : m.version<m.versions;
+        arrow.setContentDescription(direction<0?"上一版":"下一版"); arrow.setEnabled(enabled); arrow.setAlpha(enabled?1f:.3f);
+        a.buttonStyle(arrow,PAPER,10); a.pad(arrow,0,0); row.addView(arrow,a.size(36,32));
+    }
+    private void jump(long id) {
+        TextView bubble=bubbles.get(id);
+        if (bubble==null) return;
+        scroll.post(()->{
+            Rect rect=new Rect(); View group=(View)bubble.getParent();
+            group.getDrawingRect(rect); scroll.offsetDescendantRectToMyCoords(group,rect); scroll.scrollTo(0,rect.top);
+        });
+    }
+    private void showBranches() {
+        List<String> labels=new ArrayList<>(); List<Runnable> actions=new ArrayList<>();
+        for (History.Branch b:app.history.branches(chatId)) {
+            labels.add((b.id==draftBranch?"✓  ":"")+b.label());
+            actions.add(()->{ app.history.selectBranch(chatId,b.id); draw(); });
+        }
+        for (History.Message m:app.history.messages(chatId)) if (m.saved) {
+            String name=m.text.isEmpty() && !m.attachments.isEmpty() ? m.attachments.get(0).name : m.text;
+            name=name.replace('\n',' ').trim();
+            labels.add("存档 · "+name.substring(0,name.offsetByCodePoints(0,Math.min(16,name.codePointCount(0,name.length())))));
+            actions.add(()->jump(m.id));
+        }
+        new AlertDialog.Builder(this).setTitle("分支").setItems(labels.toArray(new String[0]),(d,i)->actions.get(i).run()).show();
+    }
+    private void messageMenu(long id) {
+        History.Message m=app.history.at(draftBranch,id);
+        List<String> labels=new ArrayList<>(); List<Runnable> actions=new ArrayList<>();
+        labels.add(m.saved?"取消存档":"存档");
+        actions.add(()->{ app.history.bookmark(draftBranch,id,!m.saved); draw(); jump(id); });
+        if (!app.chat.busy()) {
+            labels.add("分支"); actions.add(()->{ app.history.fork(chatId,id); draw(); });
+            if (!"dice".equals(m.role)) {
+                labels.add("编辑"); actions.add(()->editMessage(m));
+                if ("assistant".equals(m.role) && id==lastAssistant) {
+                    labels.add("重生成");
+                    actions.add(()->{ if (app.chat.regenerate(chatId,id)) draw(); else toast("未连接"); });
+                }
+            }
+        }
+        new AlertDialog.Builder(this).setItems(labels.toArray(new String[0]),(d,i)->actions.get(i).run()).show();
+    }
+    private void editMessage(History.Message m) {
+        EditText field=new EditText(this); field.setMinLines(2); field.setMaxLines(8);
+        field.setText(m.text); field.setSelection(field.length());
+        AlertDialog dialog=new AlertDialog.Builder(this).setTitle("编辑").setView(field)
+                .setNegativeButton("取消",null).setPositiveButton("保存",null).create();
+        dialog.setOnShowListener(d->dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{
+            String value=field.getText().toString();
+            if (value.trim().isEmpty() && m.attachments.isEmpty()) { toast("内容为空"); return; }
+            if (!value.equals(m.text)) app.history.edit(chatId,m.id,value);
+            dialog.dismiss(); draw();
+        }));
+        dialog.show();
+    }
+    private void diceMenu() {
+        if (app.chat.busy()) { toast("正在处理"); return; }
+        LinearLayout panel=a.column(); a.pad(panel,18,8);
+        EditText field=new EditText(this); field.setSingleLine(); field.setHint("2d6+1"); panel.addView(field);
+        AlertDialog dialog=new AlertDialog.Builder(this).setTitle("骰子").setView(panel)
+                .setNegativeButton("取消",null).setPositiveButton("掷骰",null).create();
+        LinearLayout row=null;
+        for (int i=0;i<Dice.FACES.length;i++) {
+            if (i%4==0) { row=a.row(); panel.addView(row); }
+            String expr="d"+Dice.FACES[i];
+            TextView button=a.button(expr,false,()->roll(expr,dialog)); a.pad(button,2,0);
+            row.addView(button,new LinearLayout.LayoutParams(0,a.dp(42),1));
+        }
+        dialog.setOnShowListener(d->dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->roll(field.getText().toString(),dialog)));
+        dialog.show();
+    }
+    private void roll(String expression,AlertDialog dialog) {
+        try {
+            app.history.roll(chatId,Dice.roll(expression)); dialog.dismiss(); update();
+        } catch (IllegalArgumentException e) { toast("骰式无效"); }
     }
     private boolean retryService() { return "failed".equals(app.serviceState)||"stopped".equals(app.serviceState); }
 
@@ -448,7 +564,7 @@ public final class MainActivity extends Activity {
         if (app.imports.busy(chatId)) return;
         int slots=Attachment.MAX_PHOTOS-Attachment.photos(draftFiles);
         if (slots<=0) { toast("最多 9 张图片"); return; }
-        photoChat=chatId;
+        photoChat=chatId; photoBranch=draftBranch;
         if (Build.VERSION.SDK_INT>=33) {
             Intent pick=new Intent(MediaStore.ACTION_PICK_IMAGES).setType("image/*");
             if (slots>1) pick.putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX,Math.min(slots,MediaStore.getPickImagesMaxLimit()));
@@ -461,7 +577,7 @@ public final class MainActivity extends Activity {
     private void documents() {
         if (app.imports.busy(chatId)) return;
         if (Attachment.documents(draftFiles)>=Attachment.MAX_DOCUMENTS) { toast("最多 4 个文件"); return; }
-        photoChat=chatId;
+        photoChat=chatId; photoBranch=draftBranch;
         try { startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
                 .setType("*/*").putExtra(Intent.EXTRA_ALLOW_MULTIPLE,true),DOCUMENT); }
         catch (ActivityNotFoundException e) { toast("无法选择文件"); }
@@ -469,7 +585,7 @@ public final class MainActivity extends Activity {
     private void camera() {
         if (app.imports.busy(chatId)) return;
         if (Attachment.photos(draftFiles)>=Attachment.MAX_PHOTOS) { toast("最多 9 张图片"); return; }
-        photoChat=chatId;
+        photoChat=chatId; photoBranch=draftBranch;
         try {
             File dir=new File(getCacheDir(),"camera"); dir.mkdirs(); File f=File.createTempFile("photo-",".jpg",dir); cameraPath=f.getPath();
             Uri dest=FileProvider.getUriForFile(this,getPackageName()+".photos",f);
@@ -497,7 +613,7 @@ public final class MainActivity extends Activity {
         if (req!=PICK && req!=CAMERA && req!=DOCUMENT) return;
         File camera=req==CAMERA && cameraPath!=null ? new File(cameraPath) : null;
         cameraPath=null;
-        if (photoChat!=chatId) { if (camera!=null) camera.delete(); return; }
+        if (photoChat!=chatId || photoBranch!=draftBranch) { if (camera!=null) camera.delete(); return; }
         Set<Uri> sources=new LinkedHashSet<>();
         if (camera!=null) sources.add(Uri.fromFile(camera));
         else if (data!=null && data.getClipData()!=null) {

@@ -40,6 +40,9 @@ final class Wire {
         return prompt(ctx,session,id,text,files,allowance,Attachment.documentImageSlots(files));
     }
     static JSONObject prompt(Context ctx,String session,String id,String text,List<Attachment> files,int allowance,int docSlots) throws IOException {
+        return request(obj("sessionId",session,"requestId",id,"mode","queue","content",parts(ctx,text,files,allowance,docSlots,false)));
+    }
+    static JSONArray parts(Context ctx,String text,List<Attachment> files,int allowance,int docSlots,boolean historical) throws IOException {
         if (Attachment.photos(files)>Attachment.MAX_PHOTOS || Attachment.documents(files)>Attachment.MAX_DOCUMENTS)
             throw new IOException("attachment-limit");
         docSlots=Math.min(docSlots,Attachment.documentImageSlots(files));
@@ -60,20 +63,20 @@ final class Wire {
         for (int i=0;i<files.size();i++) {
             Attachment item=files.get(i);
             if (item.kind==Attachment.Kind.TEXT) {
-                int sent=document(ctx,parts,item,limits[i],Math.min(docSlots,Attachment.MAX_EMBEDDED_IMAGES));
+                int sent=document(ctx,parts,item,limits[i],Math.min(docSlots,Attachment.MAX_EMBEDDED_IMAGES),historical);
                 image+=sent; docSlots-=sent;
             } else if (item.kind==Attachment.Kind.SCAN) {
                 parts.put(obj("type","text","text",ContextUsage.fileLabel(item.name)));
                 int pages=Math.min(docSlots,item.imageCount());
-                for (int p=0;p<pages;p++) addImage(ctx,parts,item.paths.get(p),item.name+" - "+(p+1)+".jpg");
+                for (int p=0;p<pages;p++) addImage(ctx,parts,item.paths.get(p),item.name+" - "+(p+1)+".jpg",historical);
                 image+=pages; docSlots-=pages;
             } else {
-                addImage(ctx,parts,item.paths.get(0),"照片"+(++image)+".jpg");
+                addImage(ctx,parts,item.paths.get(0),"照片"+(++image)+".jpg",historical);
             }
         }
-        return request(obj("sessionId",session,"requestId",id,"mode","queue","content",parts));
+        return parts;
     }
-    private static int document(Context ctx,JSONArray parts,Attachment item,int limit,int slots) throws IOException {
+    private static int document(Context ctx,JSONArray parts,Attachment item,int limit,int slots,boolean historical) throws IOException {
         byte[] raw=Files.readAllBytes(Attachment.file(ctx,item.paths.get(0)).toPath());
         int end=Math.min(raw.length,limit);
         while (end>0 && end<raw.length && (raw[end]&0xc0)==0x80) end--;
@@ -89,7 +92,7 @@ final class Wire {
             // Only recorded offsets designate images. Literal brackets in the source are ordinary text.
             if (sent>=slots || !body.startsWith(mark,at)) continue;
             parts.put(obj("type","text","text",part.append(mark).toString()));
-            addImage(ctx,parts,item.paths.get(i+1),item.name+" "+mark+".jpg");
+            addImage(ctx,parts,item.paths.get(i+1),item.name+" "+mark+".jpg",historical);
             sent++; part.setLength(0);
         }
         part.append(body,cursor,body.length());
@@ -97,7 +100,8 @@ final class Wire {
         if (part.length()>0) parts.put(obj("type","text","text",part.toString()));
         return sent;
     }
-    private static void addImage(Context ctx,JSONArray parts,String path,String name) throws IOException {
+    private static void addImage(Context ctx,JSONArray parts,String path,String name,boolean historical) throws IOException {
+        if (historical) { parts.put(obj("type","text","text","[图片："+name+"]")); return; }
         byte[] raw=Files.readAllBytes(Attachment.file(ctx,path).toPath());
         parts.put(obj("type","image","mediaType","image/jpeg","data",Base64.getEncoder().encodeToString(raw),"name",name));
     }

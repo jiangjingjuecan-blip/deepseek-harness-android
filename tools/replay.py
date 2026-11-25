@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import queue
 import signal
 import stat
 import subprocess
@@ -105,6 +106,70 @@ class Server(BaseHTTPRequestHandler):
             return
         if self.is_title(obj):
             self.stream('回放')
+            return
+        if self.server.device_adventure:
+            texts=[''.join(b.get('text','') for b in m['content'] if not b.get('text','').startswith('<system-reminder>')) for m in msgs]
+            roll=self.server.device_roll
+            if len(texts)==1 and texts==['设备开场']:
+                label,answer='entrance','门前'
+            elif len(texts)==3 and texts[:2]==['设备开场','门前'] and re.fullmatch(r'\[骰子 d20 \| (\d+) \| \1\]\n查门',texts[-1]):
+                if roll is not None and roll!=texts[-1]:
+                    self.send_error(400)
+                    return
+                self.server.device_roll=texts[-1]
+                label,answer=('regen','金钥匙') if 'silver' in self.server.seen else ('silver','银钥匙')
+            elif roll and texts==['设备开场','门前',roll,'铜钥匙','用钥匙']:
+                label,answer='edited-assistant','打开'
+            elif roll and texts==['设备开场','门前',roll.replace('查门','回营')]:
+                label,answer='edited-user','归来'
+            elif texts==['设备开场','门前','向北']:
+                label,answer='fork','山路'
+            else:
+                self.send_error(400)
+                return
+            if [m['role'] for m in msgs]!=['user' if i%2==0 else 'assistant' for i in range(len(texts))]:
+                self.send_error(400)
+                return
+            self.server.seen.add(label)
+            self.stream(answer)
+            return
+        if self.server.adventure:
+            # Expectations arrive over the test process's private pipe. Inspect the
+            # actual provider envelope after DSH has forked, restored or compacted.
+            try:
+                want=self.server.expected.get(timeout=6)
+            except queue.Empty:
+                self.server.mismatches+=1
+                self.send_error(400)
+                return
+            rendered=[b.get('text','') for m in msgs for b in m['content']]
+            reminders=[t for t in rendered if t.startswith('<system-reminder>')]
+            texts=[[m['role'], ''.join(b.get('text','') for b in m['content'] if b.get('text','') not in reminders)] for m in msgs]
+            prefix=(obj.get('system'),obj.get('tools'),reminders)
+            if 'Condense the conversation ABOVE' not in last and texts:
+                # When the first question is unchanged, its complete block sequence must match,
+                # including runtime context, images and positions.
+                known=self.server.first_inputs.setdefault(texts[0][1],msgs[0])
+                same_first=known==msgs[0]
+            else:
+                same_first=True
+            summary='Condense the conversation ABOVE' in last
+            if self.server.prefix is None and not summary:
+                self.server.prefix=prefix
+            images=[b.get('source',{}).get('file_id') for m in msgs for b in m['content'] if b.get('type')=='image']
+            photo_question=want.get('photoQuestion')
+            photo_ok=photo_question is None or (len(msgs)==1 and msgs[0]['role']=='user' and
+                    any(b.get('text')==photo_question for b in msgs[0]['content']))
+            match=(same_first and photo_ok and texts==want.get('messages',texts) and images==want.get('images',images) and
+                   all(t in contents for t in want.get('include',[])) and
+                   all(t not in contents for t in want.get('exclude',[])) and
+                   (summary if want.get('summary') else not summary and prefix==self.server.prefix))
+            if not match:
+                self.server.mismatches+=1
+                self.send_error(400)
+                return
+            self.server.matched+=1
+            self.stream(want['answer'])
             return
         if '测试新模型' in last or '核对恢复' in last:
             future='测试新模型' in last
@@ -253,10 +318,16 @@ def run(abi, root, serial=None, scenario='context'):
     home = root/'dsh'
     home.mkdir(exist_ok=True)
     with ThreadingHTTPServer(('127.0.0.1',0),Server) as server:
+        server.device_adventure=scenario=='adventure-ui'
+        server.device_roll=None
+        server.adventure=scenario=='adventure'
+        server.expected=queue.Queue()
+        server.matched=server.mismatches=0
         server.device_attachments=scenario=='attachments'
         server.advance=threading.Event()
         server.grant=secrets.token_urlsafe(24)
         server.seen=set()
+        server.first_inputs={}
         server.prefix=None
         server.first_reply=None
         server.summaries=[]
@@ -297,9 +368,13 @@ def run(abi, root, serial=None, scenario='context'):
                     sys.stdout.close()
                 threading.Thread(target=pipe_launch,daemon=True).start()
                 for line in sys.stdin:
+                    if server.adventure and line.startswith('{'):
+                        server.expected.put(json.loads(line))
                     if line.strip()=='advance':
                         server.advance.set()
                     if line.strip()=='done':
+                        if server.adventure:
+                            return server.matched>0 and not server.mismatches and server.expected.empty()
                         return (server.summaries == ['a','b'] and
                                 server.seen=={'early','multi','image-turn','photo','quota','future-cap','restored-cap',
                                               'summary-a','summary-b','manual-tail','auto-tail','twenty-images','file-turn'})
@@ -326,6 +401,8 @@ def device(serial, server, root, runtime_port, bootstrap, scenario):
                               stdout=subprocess.PIPE,text=True,check=True)
         print(result.stdout, end='')
         print('Provider observations:',', '.join(sorted(server.seen)))
+        if scenario=='adventure-ui':
+            return 'passed=adventure-ui' in result.stdout and server.seen=={'entrance','silver','regen','edited-assistant','edited-user','fork'}
         if scenario=='attachments':
             return 'passed=attachments' in result.stdout and 'device-attachments' in server.seen
         return ('passed=context' in result.stdout and server.summaries == ['a','b'] and
@@ -337,9 +414,9 @@ def device(serial, server, root, runtime_port, bootstrap, scenario):
 
 if __name__=='__main__':
     os.umask(0o077)
-    if len(sys.argv)==3 and sys.argv[1] in ('--device','--device-attachments'):
+    if len(sys.argv)==3 and sys.argv[1] in ('--device','--device-attachments','--device-adventure'):
         with tempfile.TemporaryDirectory(prefix='phone-context-') as root:
-            raise SystemExit(0 if run('arm64-v8a',Path(root),sys.argv[2], 'attachments' if sys.argv[1]=='--device-attachments' else 'context') else 1)
-    if not all(stat.S_ISFIFO(os.fstat(fd).st_mode) for fd in (0,1)) or len(sys.argv)!=3:
+            raise SystemExit(0 if run('arm64-v8a',Path(root),sys.argv[2], {'--device':'context','--device-attachments':'attachments','--device-adventure':'adventure-ui'}[sys.argv[1]]) else 1)
+    if not all(stat.S_ISFIFO(os.fstat(fd).st_mode) for fd in (0,1)) or (len(sys.argv)!=3 and sys.argv[3:]!=['adventure']):
         raise SystemExit('Run the Gradle replay test.')
-    raise SystemExit(0 if run(sys.argv[1],Path(sys.argv[2])) else 1)
+    raise SystemExit(0 if run(sys.argv[1],Path(sys.argv[2]),scenario=sys.argv[3] if len(sys.argv)==4 else 'context') else 1)

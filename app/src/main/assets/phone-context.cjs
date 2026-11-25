@@ -4,6 +4,7 @@ const DOCUMENT_IMAGE_COST = 1024 + 8 + 8
 const RECENT_TURNS = 4
 const MARGIN = 16_384
 const MARKER = 'phone-compact'
+const RESTORE = 'phone-restore'
 
 function catalogModel(model) {
   return model === 'deepseek-flash' || model === 'deepseek-v4-pro'
@@ -26,7 +27,7 @@ function olderRange(session) {
   for (let i = 0; i < nodes.length; i++) {
     const e = session.eventAt(nodes[i])
     if (e.type !== 'user/message') continue
-    if (e.data.source.kind === 'user') users.push(i)
+    if (e.data.source.kind === 'user' || e.data.source.kind === 'phone-history') users.push(i)
     if (e.data.source.kind === 'compact-checkpoint' && firstCheckpoint < 0) firstCheckpoint = i
   }
   if (users.length <= RECENT_TURNS + 1) return null
@@ -73,9 +74,43 @@ function pressure(ctx, session) {
   return Math.max(measurement.totalTokens, estimate)
 }
 
+// V6 stored the DSH ID but no seqs. Match original append events (including
+// ones later compacted off the surface) in order. Stop at any disagreement.
+function legacyCuts(session, expected) {
+  const hash = text => require('node:crypto').createHash('sha256').update(text).digest('hex')
+  const cuts = []
+  let user = false, chunks = []
+  for (let seq = 0; seq < session.seq; seq++) {
+    const e = session.eventAt(seq)
+    if (e.type === 'user/message' && e.surfaceOp === 'append') {
+      const kind = e.data.source.kind
+      if (kind === 'runtime-context' && user && !chunks.length) cuts[cuts.length - 1] = seq
+      if (kind !== 'user') continue
+      const want = expected[cuts.length]
+      const first = e.data.content[0]
+      if (user || !want || want[0] !== 'user' || !first) break
+      if (want[1] === null ? !(first.type === 'image' || first.text?.startsWith('[文件：')) :
+          first.type !== 'text' || hash(first.text) !== want[1]) break
+      cuts.push(seq)
+      user = true
+      chunks = []
+    } else if (user && e.type === 'assistant/message' && e.surfaceOp === 'append') {
+      const text = e.data.message.content.filter(b => b.type === 'text').map(b => b.text).join('')
+      if (text) chunks.push(text)
+    } else if (user && e.type === 'turn/end') {
+      const want = expected[cuts.length]
+      if (!want || want[0] !== 'assistant' || e.data.reason?.kind !== 'completed' || hash(chunks.join('\n\n')) !== want[1]) break
+      cuts.push(seq)
+      user = false
+      if (cuts.length === expected.length) break
+    }
+  }
+  return cuts
+}
+
 exports.name = 'phone-context'
 exports.inject = ['compaction', 'tokenMeter', 'commands', 'sessions', 'llm']
-exports.apply = function apply(ctx) {
+exports.apply = function apply(ctx, config) {
   const pending = new WeakMap()
   const pictures = new WeakSet()
 
@@ -103,11 +138,35 @@ exports.apply = function apply(ctx) {
   // compactRegion requires an open turn. A private, empty inbox item opens a
   // DSH maintenance turn. Returning no messages closes it before an LLM step.
   // An orphaned marker after recovery is consumed without invoking the model.
-  ctx.on('agent/pre-step', async ({agent, messages, signal}, next) => {
-    const marker = messages.find(m => m.source.kind === MARKER)
+  ctx.on('agent/pre-step', async ({agent, messages, signal, turn, step}, next) => {
+    const marker = messages.find(m => m.source.kind === MARKER || m.source.kind === RESTORE)
     if (!marker) return next()
+    const decision = await next()
+    if (decision.kind !== 'enter') return decision
     const job = pending.get(agent)
-    if (job && marker.id === job.id) {
+    if (job && marker.id === job.id && marker.source.kind === RESTORE) {
+      const {role, content} = job.row
+      // The normal driver admits the persona before the first message. Use the
+      // same preset scalar and the driver's own runtime-context proposal.
+      if (!agent.session.surface.nodes.length) {
+        const system = {id: job.id + '-system', role: 'system', source: {kind: 'system-prompt'},
+          content: [{type: 'text', text: config.persona}]}
+        agent.session.append('system/message', {turn, step, message: system}, {surfaceOp: 'append'})
+      }
+      const source = role === 'user' ? {kind: 'phone-history'} : {kind: 'model', provider: 'phone-local', model: 'transcript'}
+      const message = {id: job.id, role, content, source}
+      const event = role === 'user'
+        ? agent.session.append('user/message', message, {surfaceOp: 'append'})
+        : agent.session.append([
+          ['step/start', {turn, step}],
+          ['assistant/message', {turn, step, message, stream: []}, {surfaceOp: 'append'}],
+          ['step/end', {turn, step}],
+        ])[2]
+      job.seq = event.seq
+      for (const reminder of decision.messages.filter(m => m.source.kind === 'runtime-context')) {
+        job.seq = agent.session.append('user/message', reminder, {surfaceOp: 'append'}).seq
+      }
+    } else if (job && marker.id === job.id) {
       const range = olderRange(agent.session)
       if (range) {
         const abort = AbortSignal.any([signal, job.signal])
@@ -116,10 +175,43 @@ exports.apply = function apply(ctx) {
       }
       job.finished = true
     }
-    const decision = await next()
-    if (decision.kind !== 'enter') return decision
-    return { ...decision, messages: decision.messages.filter(m => m.source.kind !== MARKER) }
+    // Even an empty cold turn can propose a runtime reminder. It must not start a provider request.
+    const ordinary = m => m.source.kind !== MARKER && m.source.kind !== RESTORE
+    return { ...decision, messages: messages.some(ordinary) ? decision.messages.filter(ordinary) : [] }
   }, { prepend: true })
+
+  ctx.effect(() => ctx.commands.register({
+    definitionId: 'phone-locate', name: 'phone-locate', recordInput: false, description: '定位存档',
+    handler({agent, rawInput}) {
+      const expected = JSON.parse(rawInput)
+      return {kind: 'success', text: JSON.stringify(legacyCuts(agent.session, expected))}
+    },
+  }))
+
+  // Import a visible SQLite row on a private session. The empty maintenance turn
+  // gives it a real turn boundary without replaying a prompt against the model.
+  ctx.effect(() => ctx.commands.register({
+    definitionId: RESTORE, name: RESTORE, recordInput: false, description: '恢复分支',
+    async handler({agent, rawInput, signal, commandId}) {
+      if (pending.has(agent)) return {kind: 'error', text: '正在处理'}
+      const row = JSON.parse(rawInput)
+      if (!['user', 'assistant'].includes(row.role) || !Array.isArray(row.content) || !row.content.length ||
+          !row.content.every(b => b.type === 'text' && typeof b.text === 'string')) return {kind: 'error', text: '参数错误'}
+      const job = {id: commandId, row}
+      pending.set(agent, job)
+      try {
+        await agent.whenIdle()
+        signal.throwIfAborted()
+        agent.followup({id: commandId, role: 'user', content: [], source: {kind: RESTORE}})
+        await agent.whenIdle()
+        if (!Number.isSafeInteger(job.seq)) return {kind: 'error', text: '恢复失败'}
+        await ctx.sessions.flush(agent.session)
+        return {kind: 'success', text: String(job.seq)}
+      } finally {
+        pending.delete(agent)
+      }
+    },
+  }))
 
   ctx.effect(() => ctx.commands.register({
     definitionId: 'phone-context', name: 'phone-context', recordInput: false,

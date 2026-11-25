@@ -8,12 +8,14 @@ DeepSeek 助手是一款 Android 聊天客户端。它通过 PRoot 在手机上�
 
 聊天顶栏显示当前上下文用量。点百分比可选「压缩上下文」。自动压缩会保留首轮和最近四轮。历史列表仍可查看完整原文和照片。[上下文策略与实测](docs/CONTEXT.md)
 
+长按任意消息可以存档或分支。回复支持重生成、编辑和版本切换。输入框的「骰子」在本机掷骰，下次发送时会把点数交给模型判定。[文游操作与存储](docs/ADVENTURE.md)
+
 ## 安装测试版
 
 适用于 Android 10 及以上、支持 `arm64-v8a` 的手机。
 
-1. 在项目的 GitHub Release 中找到 `v0.1.5-test`，下载附件 `deepseek-harness-test.apk`。[发布页](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/tag/v0.1.5-test) · [下载 APK](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/download/v0.1.5-test/deepseek-harness-test.apk)
-2. 核对文件大小 **134,301,846 字节（128.08 MiB）**。在电脑上可运行 `sha256sum deepseek-harness-test.apk`，预期 SHA-256 为 `5ccab76e9e43f24c6f14038ed856d3633f6fc7c121a537abb1a7bbc51efd4a6b`。
+1. 在项目的 GitHub Release 中找到 `v0.1.6-test`，下载附件 `deepseek-harness-test.apk`。[发布页](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/tag/v0.1.6-test) · [下载 APK](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/download/v0.1.6-test/deepseek-harness-test.apk)
+2. 核对文件大小 **134,334,570 字节（128.11 MiB）**。在电脑上可运行 `sha256sum deepseek-harness-test.apk`，预期 SHA-256 为 `d236bf23b8ade4d8b5454ea720b69bcd1b7e2b7ae725984ff8aa85879c360487`。
 3. 在手机上点开 APK 安装。已安装此前 v0.1.0-test 至 v0.1.5-test 的手机可覆盖安装，保留本地对话。如果系统询问，允许当前浏览器或文件管理器安装此应用。
 
 ## 在手机上试用

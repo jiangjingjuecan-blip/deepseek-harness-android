@@ -7,7 +7,7 @@
           - id: persona
             name: '@deepseek-ai/dsh-persona'
             config:
-              prefix: 你是 DeepSeek 助手。请自然、简洁地回答用户的问题。
+              prefix: &phonePersona 你是 DeepSeek 助手。请自然、简洁地回答用户的问题。
               complete: true
               includeRuntimeContext: false
           - id: compaction
@@ -23,3 +23,5 @@
                   maxTokens: 2048
               - id: phone-context
                 name: /etc/phone-context.cjs
+                config:
+                  persona: *phonePersona

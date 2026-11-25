@@ -10,6 +10,7 @@ final class Reply {
     private int turn=-1;
     private String attemptId;
     boolean ended, completed;
+    long userSeq=-1, endSeq=-1;
     long contextTokens=-1;
     ChatFailure failure, attemptFailure;
     Reply(String requestId) { this.requestId=requestId; }
@@ -60,6 +61,12 @@ final class Reply {
             return false;
         }
         switch (event.getString("type")) {
+            case "user/message":
+                JSONObject source=data.optJSONObject("source");
+                if (source!=null && (requestId.equals(source.optString("rpcId"))
+                        || (userSeq>=0 && attemptId==null && "runtime-context".equals(source.optString("kind")))))
+                    userSeq=event.optLong("seq",userSeq);
+                return false;
             case "assistant/message":
                 if (event.getJSONObject("data").getInt("turn")!=turn || !"append".equals(event.optString("surfaceOp"))) return false;
                 long count=ContextUsage.tokens(data.optJSONObject("usage"));
@@ -77,7 +84,7 @@ final class Reply {
                 partial.setLength(0); return true;
             case "turn/end":
                 if (event.getJSONObject("data").getInt("turn")!=turn) return false;
-                ended=true; JSONObject reason=data.optJSONObject("reason");
+                endSeq=event.optLong("seq",-1); ended=true; JSONObject reason=data.optJSONObject("reason");
                 completed=reason!=null && "completed".equals(reason.optString("kind")) && !body().isEmpty();
                 if (!completed) failure=ChatFailure.turn(reason,attemptFailure);
                 return true;

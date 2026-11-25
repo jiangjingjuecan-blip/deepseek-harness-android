@@ -19,7 +19,7 @@ final class ChatFailure extends IOException {
             "gateway/bad-request gateway/internal gateway/forbidden gateway/not-found gateway/method-unavailable " +
             "gateway/arguments-invalid gateway/input-invalid gateway/result-invalid gateway/binding-invalid gateway/signature-invalid " +
             "gateway/peer-disposed gateway/cancelled gateway/context-not-found session/conflict session/agent-busy " +
-            "session/not-found session/model-unavailable session/attachment-invalid session/workspace-attach-failed workspace/not-found " +
+            "session/fork-unavailable session/not-found session/model-unavailable session/attachment-invalid session/workspace-attach-failed workspace/not-found " +
             "MODEL_DOES_NOT_SUPPORT_IMAGES").split(" ")));
     private static final Set<String> SYSTEM_CODES = new LinkedHashSet<>(Arrays.asList(
             "ENOSYS", "ENOENT", "ENOSPC", "ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED",
