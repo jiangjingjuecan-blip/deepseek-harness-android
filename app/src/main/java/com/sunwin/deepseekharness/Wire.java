@@ -2,6 +2,10 @@ package com.sunwin.deepseekharness;
 
 import org.json.*;
 import java.net.URI;
+import android.content.Context;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.*;
 import java.math.BigDecimal;
 
@@ -32,11 +36,38 @@ final class Wire {
         } catch (IllegalArgumentException ignored) { }
         return null;
     }
-    static JSONObject prompt(String session, String id, String text, String jpeg) {
-        JSONArray parts = new JSONArray();
-        if (!text.isEmpty()) parts.put(obj("type", "text", "text", text));
-        if (jpeg != null) parts.put(obj("type", "image", "mediaType", "image/jpeg", "data", jpeg, "name", "照片.jpg"));
-        return request(obj("sessionId", session, "requestId", id, "mode", "queue", "content", parts));
+    static JSONObject prompt(Context ctx,String session,String id,String text,List<Attachment> files,int allowance) throws IOException {
+        JSONArray parts=new JSONArray();
+        if (!text.isEmpty()) parts.put(obj("type","text","text",text));
+        // Give short documents their full length and divide the remainder between long ones.
+        List<Attachment> docs=new ArrayList<>();
+        for (Attachment item:files) if (item.kind==Attachment.Kind.TEXT) docs.add(item);
+        docs.sort(Comparator.comparingInt(item->item.textBytes));
+        Map<Attachment,Integer> limits=new IdentityHashMap<>();
+        for (int i=0;i<docs.size();i++) {
+            Attachment item=docs.get(i);
+            int bytes=Math.min(item.textBytes,allowance/(docs.size()-i));
+            limits.put(item,bytes); allowance-=bytes;
+        }
+        int image=0;
+        for (Attachment item:files) {
+            if (item.kind==Attachment.Kind.TEXT) {
+                byte[] raw=Files.readAllBytes(Attachment.file(ctx,item.paths.get(0)).toPath());
+                int end=Math.min(raw.length,limits.get(item));
+                while (end>0 && end<raw.length && (raw[end]&0xc0)==0x80) end--;
+                String body=new String(raw,0,end,StandardCharsets.UTF_8)+(end<raw.length ? "\n…" : "");
+                parts.put(obj("type","text","text",ContextUsage.fileLabel(item.name)+body));
+            } else {
+                if (item.kind==Attachment.Kind.SCAN) parts.put(obj("type","text","text",ContextUsage.fileLabel(item.name)));
+                for (int page=0;page<item.paths.size();page++) {
+                    image++;
+                    String name=item.kind==Attachment.Kind.SCAN ? item.name+" - "+(page+1)+".jpg" : "照片"+image+".jpg";
+                    byte[] raw=Files.readAllBytes(Attachment.file(ctx,item.paths.get(page)).toPath());
+                    parts.put(obj("type","image","mediaType","image/jpeg","data",Base64.getEncoder().encodeToString(raw),"name",name));
+                }
+            }
+        }
+        return request(obj("sessionId",session,"requestId",id,"mode","queue","content",parts));
     }
     static JSONObject follow(String session) {
         return obj("type","open","streamId","reply","endpoint","session/follow","payload", obj("args",

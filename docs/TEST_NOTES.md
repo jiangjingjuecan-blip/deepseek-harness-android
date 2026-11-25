@@ -1,5 +1,14 @@
 # 安卓安装包验证
 
+## v0.1.5-test
+
+- ARM64 签名包大小为 **134,285,326 字节（128.06 MiB）**，SHA-256 为 `83953c98e9b28c22c7a00112d093aa8d6fd8df9a6bd000a48ec9652d148fede0`。包名为 `com.sunwin.deepseekharness`，versionCode 6，versionName 0.1.5，minSdk 29，targetSdk 34。APK v2 签名和 ZIP 对齐检查通过。本次逐一核对了 0.1.0 至 0.1.4 的五个公开 APK，证书 SHA-256 均为 `b849e51b4f5a8691ffca6eecbae2592fc28afe06acccc148c52b67f2abc2079e`。[下载 APK](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/download/v0.1.5-test/deepseek-harness-test.apk)
+- 宿主机分别运行官方 x86_64 与 ARM64 DSH 0.2.2-rc.2，两组各通过 29 项测试，跳过 0 项。本地推理端验证了同一次模型请求中的 9 个有序图片引用，下一轮验证 9 个旧图占位符。旧文件正文进入原生压缩摘要，首轮前缀和最近四轮通过原有回归检查。另测了不同模型下的文件字节预算和剩余空间边界。[官方运行时回放](../app/src/test/java/com/sunwin/deepseekharness/HarnessReplayTest.java)
+- SQLite v4 的单图行迁入 v5，关闭并重开后从原路径解码出像素。测试也核对了草稿、共享文件、独占扫描页、删除回滚、UTF-8 截断和本机较长的预览。文本、Markdown、CSV、JSON、代码、三种 Office 文档和 PDF 均有生成或合成样例。主机的扫描页测试用 PDFBox 绘制夹具，Android 测试调用系统 PdfRenderer。[附件回归测试](../app/src/test/java/com/sunwin/deepseekharness/AttachmentTest.java)
+- 在独立的空白 Android 10 ARM64 模拟器 `upgrade015` 上先安装公开的 0.1.4。测试程序用 `attachment-seed-v4` 在 v4 数据库写入单图消息，再用 `adb install -r` 覆盖安装最终签名包。`attachment-upgrade` 打开旧对话并核对缩略图。设备内 APK 的 SHA-256 与下载文件一致。
+- Android 10 ARM64 模拟器经 ADB 回环连接隔离的官方 ARM64 DSH。测试给系统选择器和相机注入合成结果，操作真实的草稿移除、发送和文件芯片。接收端在同一轮看到 3 张图及 TXT、DOCX 两份正文。全屏滑动切换图片后，用双指触摸事件放大，再检查原留白位置的像素。强制停止后重开，缩略图、文件正文和升级前的旧照片都能再次查看。[模拟器界面测试](../app/src/androidTest/java/com/sunwin/deepseekharness/DeviceAttachments.java)
+- 一次合并运行在模拟器的 Android 10 ART JIT 编译线程中出现 SIGSEGV。将界面回放与 PDF 测试分进程后，两项均通过。系统渲染器在仅剩 2 个图片名额时将五页扫描夹具的前两页转为 JPEG，文字 PDF 在零图片名额下也读出了正文。测试使用合成数据，真实模型调用 0 次，费用 ¥0。未在 iQOO 真机上测试。[格式与限额](ATTACHMENTS.md)
+
 ## v0.1.4-test
 
 - 签名 APK 的 versionCode 为 5，versionName 为 0.1.4，包名为 `com.sunwin.deepseekharness`，架构为 `arm64-v8a`。文件大小为 **131,181,049 字节（125.10 MiB）**，SHA-256 为 `6d8c2207abf7fde85532420135ce41b4f32d0f63aed7ac76e54471c4c184d0fc`。[下载 APK](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/download/v0.1.4-test/deepseek-harness-test.apk)

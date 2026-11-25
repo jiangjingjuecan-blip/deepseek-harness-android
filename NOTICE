@@ -73,6 +73,11 @@ Android 客户端和构建工具
   https://square.github.io/okhttp/
   https://publicsuffix.org/
 
+  PdfBox-Android 2.0.27.0 提供 PDF 文本提取。Apache PDFBox、FontBox 及
+  相关资源的版权、Apache-2.0 和第三方许可随 APK 保存在
+  assets/licenses/PdfBox-Android-NOTICE.txt 和 PdfBox-Android-LICENSE.txt。
+  https://github.com/TomRoush/PdfBox-Android/tree/v2.0.27.0
+
   Gradle Wrapper 8.9 的启动脚本和 JAR 使用 Apache-2.0。脚本保留原版权头，
   完整许可位于 gradle/wrapper/gradle-wrapper.jar 中的 META-INF/LICENSE。
   Android Gradle Plugin 8.7.3 使用 Apache-2.0。

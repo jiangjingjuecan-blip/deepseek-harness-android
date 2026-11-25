@@ -1,5 +1,7 @@
 package com.sunwin.deepseekharness;
 
+import java.util.*;
+
 import org.junit.*;
 import org.junit.rules.TemporaryFolder;
 import org.json.*;
@@ -20,13 +22,10 @@ public class CoreTest {
         assertFalse(text.contains("opaque")); assertFalse(text.contains("callback"));
         assertTrue(text.contains("PERMISSION_ERROR")); assertTrue(text.contains("NATIVE_SIGNAL 9")); assertTrue(text.contains("HTTP_ACCOUNT 401"));
     }
-    @Test public void strictAuthOriginAndSameTurnImage() throws Exception {
+    @Test public void strictAuthOrigin() throws Exception {
         assertNotNull(Wire.authorization("https://platform.deepseek.com/dsh/authorize?state=test"));
         assertNull(Wire.authorization("https://platform.deepseek.com@example.com/dsh/authorize"));
         assertNull(Wire.authorization("http://platform.deepseek.com/dsh/authorize"));
-        JSONArray parts=Wire.prompt("s","m","看图","base64").getJSONObject("request").getJSONArray("content");
-        assertEquals(2,parts.length()); assertEquals("看图",parts.getJSONObject(0).getString("text"));
-        assertEquals("image/jpeg",parts.getJSONObject(1).getString("mediaType"));
     }
     @Test public void onlyAccountModelsAndSeparateCurrencyTotals() throws Exception {
         JSONObject c=new JSONObject("{groups:[{id:'api',models:[{id:'other'}]},{id:'deepseek-account',models:[{id:'other-account'},{id:'deepseek-flash'}]}]}");
@@ -94,7 +93,7 @@ public class CoreTest {
                 Wire.obj("type","text","text","好"))),"usage",usage)));
         assertEquals(378,r.contextTokens); assertEquals("好",r.body());
         assertEquals(-1,ContextUsage.tokens(Wire.obj("inputTokens",1)));
-        assertEquals(16+3+4+1032,ContextUsage.estimate("好🌷",true));
+        assertEquals(16+3+4+1032,ContextUsage.estimate("好🌷",Collections.singletonList(Attachment.photo("photos/test.jpg"))));
         ContextUsage opening=ContextUsage.projection(new JSONObject("{projections:{values:{tokenUsage:{outputTokens:999999},"+
                 "contextPressure:{pressureTokens:500000,projectedTokens:423,contextWindow:1048576}}}}"),65536);
         assertEquals(423,opening.used); assertEquals("<1%",opening.percent());

@@ -17,6 +17,7 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <activity android:name=".PhotoViewer" android:exported="false" android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen"/>
         <service android:name=".HarnessService" android:exported="false" android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="Local chat runtime and active browser sign-in callback"/>
         </service>

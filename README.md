@@ -2,7 +2,9 @@
 
 DeepSeek 助手是一款 Android 聊天客户端。它通过 PRoot 在手机上运行 DeepSeek 官方的 ARM64 Linux 版 Harness（DSH 0.2.2-rc.2）。应用通过本机回环地址连接 Harness，由 Harness 管理登录凭据，并联网调用 DeepSeek 账号可用的模型。
 
-你可以在系统浏览器登录 DeepSeek 账号，流式查看回复，把相册或相机里的图片和问题一起发送。对话历史保存在本机 SQLite 数据库，图片保存在应用私有目录。设置中可以切换模型、查看余额，并打开[官方充值页](https://platform.deepseek.com/top_up)。
+你可以在系统浏览器登录 DeepSeek 账号，流式查看回复。每条消息可带最多 9 张图片，支持相册多选、追加拍照和全屏看图。点「文件」可添加文本、代码、Office 文档或 PDF，由手机提取正文。对话和附件保存在应用私有目录。[附件格式与限额](docs/ATTACHMENTS.md)
+
+设置中可以切换模型、查看余额及充值。[官方充值页](https://platform.deepseek.com/top_up)
 
 聊天顶栏显示当前上下文用量。点百分比可选「压缩上下文」。自动压缩会保留首轮和最近四轮。历史列表仍可查看完整原文和照片。[上下文策略与实测](docs/CONTEXT.md)
 
@@ -10,17 +12,17 @@ DeepSeek 助手是一款 Android 聊天客户端。它通过 PRoot 在手机上�
 
 适用于 Android 10 及以上、支持 `arm64-v8a` 的手机。
 
-1. 在项目的 GitHub Release 中找到 `v0.1.4-test`，下载附件 `deepseek-harness-test.apk`。[发布页](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/tag/v0.1.4-test) · [下载 APK](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/download/v0.1.4-test/deepseek-harness-test.apk)
-2. 核对文件大小 **131,181,049 字节（125.10 MiB）**。在电脑上可运行 `sha256sum deepseek-harness-test.apk`，预期 SHA-256 为 `6d8c2207abf7fde85532420135ce41b4f32d0f63aed7ac76e54471c4c184d0fc`。
-3. 在手机上点开 APK 安装。已安装 v0.1.0-test 至 v0.1.3-test 的手机可直接覆盖升级，保留本地对话。如果系统询问，允许当前浏览器或文件管理器安装此应用。
+1. 在项目的 GitHub Release 中找到 `v0.1.5-test`，下载附件 `deepseek-harness-test.apk`。[发布页](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/tag/v0.1.5-test) · [下载 APK](https://github.com/jiangjingjuecan-blip/deepseek-harness-android/releases/download/v0.1.5-test/deepseek-harness-test.apk)
+2. 核对文件大小 **134,285,326 字节（128.06 MiB）**。在电脑上可运行 `sha256sum deepseek-harness-test.apk`，预期 SHA-256 为 `83953c98e9b28c22c7a00112d093aa8d6fd8df9a6bd000a48ec9652d148fede0`。
+3. 在手机上点开 APK 安装。已安装 v0.1.0-test 至 v0.1.4-test 的手机可直接覆盖升级，保留本地对话。如果系统询问，允许当前浏览器或文件管理器安装此应用。
 
 ## 在手机上试用
 
 1. 打开「DeepSeek 助手」，按需选择通知权限和电池优化豁免，等待「正在启动」变为「未登录」。启动失败时，在设置中点「重新启动」。
 2. 点「登录 DeepSeek」，在浏览器完成授权后返回应用。在设置中查看登录状态、可用模型和余额。需要再次打开授权页时，可点「继续登录」或「备用登录」。
-3. 发一个简短问题，观察回复是否逐段出现，再追问上一轮的内容。选一张相册图片或拍一张照片，把问题和图片一起发出。
+3. 发一个简短问题，观察回复是否逐段出现，再追问上一轮的内容。可在同一条消息中附上图片和文档。点已发送的图片可放大或滑动，点文件名可重新查看。
 4. 进入历史列表，新建对话。关闭再打开应用，从列表回到旧对话并续聊。在设置中点「充值」，确认打开 DeepSeek 官方页面。
-5. 在「历史对话」中长按一条对话，点「删除」可清除本机消息、上下文用量和仅该对话使用的照片。删除当前对话会打开一个新的空对话。
+5. 在「历史对话」中长按一条对话，点「删除」可清除本机消息、上下文用量和仅该对话使用的照片、扫描页和文件正文。删除当前对话会打开一个新的空对话。
 
 模拟器和回放测试的结果，以及仍需在 iQOO 11 上验证的项目，见[安装包验证记录](docs/TEST_NOTES.md)。
 

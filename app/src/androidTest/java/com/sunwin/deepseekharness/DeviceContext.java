@@ -22,7 +22,7 @@ final class DeviceContext {
         this.test=test; this.activity=activity; app=(HarnessApp)activity.getApplication();
     }
 
-    void run(int port) throws Exception {
+    void run(int port,String mode) throws Exception {
         if (port<1 || port>65535) throw new AssertionError();
         activity.stopService(new Intent(activity,HarnessService.class));
         await("stop-emulator-service",()->"stopped".equals(app.serviceState) || "failed".equals(app.serviceState));
@@ -43,6 +43,11 @@ final class DeviceContext {
             onUi(()->{
                 click("历史对话"); click("新建对话");
             });
+            if ("attachments".equals(mode)) {
+                DeviceAttachments attachments=new DeviceAttachments(test,activity);
+                try { attachments.send(); } finally { stage=attachments.stage; }
+                return;
+            }
             long id=activity.getSharedPreferences("ui",0).getLong("chat",0);
             String[] questions={"固定首问","旧甲"+repeat("甲"),"旧乙"+repeat("乙"),"近三","近四","近五","抬高用量","核对自动"};
             for (int i=0;i<questions.length;i++) {

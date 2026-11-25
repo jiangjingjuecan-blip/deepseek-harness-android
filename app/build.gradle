@@ -12,16 +12,18 @@ android {
         applicationId 'com.sunwin.deepseekharness'
         minSdk 29
         targetSdk 34
-        versionCode 5
-        versionName '0.1.4'
+        versionCode 6
+        versionName '0.1.5'
         testInstrumentationRunner 'com.sunwin.deepseekharness.DeviceSmoke'
         ndk { abiFilters abi }
     }
     testBuildType 'release'
+    testOptions.unitTests.includeAndroidResources = true
     sourceSets.main {
         jniLibs.srcDir new File(runtime, 'jni')
         assets.srcDir new File(runtime, 'assets')
     }
+    sourceSets.androidTest.assets.srcDir 'src/test/resources'
     signingConfigs {
         release {
             storeFile new File(keyDir, 'release.p12')
@@ -51,6 +53,8 @@ tasks.register('prepareRuntime', Exec) {
 }
 tasks.named('preBuild').configure { dependsOn 'prepareRuntime' }
 dependencies {
+    // Only plain PDF text is extracted. Signing and public-key encryption are unused.
+    implementation('com.tom-roush:pdfbox-android:2.0.27.0') { exclude group: 'org.bouncycastle' }
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
     implementation 'androidx.core:core:1.13.1'
     implementation 'androidx.browser:browser:1.8.0'

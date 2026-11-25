@@ -8,6 +8,7 @@ public final class HarnessApp extends Application {
     final Handler main=new Handler(Looper.getMainLooper());
     Diagnostics log;
     History history;
+    DraftImporter imports;
     Account account;
     ChatEngine chat;
     volatile Loopback api;
@@ -19,8 +20,10 @@ public final class HarnessApp extends Application {
         log=new Diagnostics(getNoBackupFilesDir());
         history=new History(this);
         int recovered=history.recover();
-        history.cleanDeletedPhotos(log);
+        history.recoverAttachmentFiles(log);
+        Documents.clearInterruptedImports(this,log);
         if (recovered>0) log.add(Diagnostics.Event.CHAT_RECOVERED_AFTER_RESTART,recovered);
+        imports=new DraftImporter(this);
         account=new Account(this); chat=new ChatEngine(this,Guest.CHAT_DIR);
     }
     void listen(Runnable callback) { listener=callback; }

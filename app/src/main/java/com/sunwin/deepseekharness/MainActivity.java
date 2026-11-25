@@ -16,18 +16,26 @@ import android.widget.*;
 import androidx.browser.customtabs.CustomTabsIntent;
 import androidx.core.content.FileProvider;
 import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.*;
 import java.util.concurrent.*;
 import static com.sunwin.deepseekharness.Appearance.*;
 
 public final class MainActivity extends Activity {
-    private static final int PICK=20, CAMERA=21, EXPORT=22, NOTIFICATIONS=24;
+    private static final int PICK=20, CAMERA=21, EXPORT=22, DOCUMENT=23, NOTIFICATIONS=24;
     private HarnessApp app;
     private Appearance a;
     private final ExecutorService files=Executors.newSingleThreadExecutor();
-    private final android.util.LruCache<String,Bitmap> thumbs=new android.util.LruCache<>(10);
+    private final ExecutorService thumbnails=Executors.newSingleThreadExecutor();
+    private final android.util.LruCache<String,Bitmap> thumbs=new android.util.LruCache<String,Bitmap>(4*1024*1024) {
+        @Override protected int sizeOf(String key,Bitmap bitmap) { return bitmap.getAllocationByteCount(); }
+    };
+    private List<Attachment> draftFiles=Collections.emptyList();
+    private List<Long> shownDraft;
+    private HorizontalScrollView attachmentScroll;
     private long chatId, photoChat;
-    private String screen="chat", draft="", photo, cameraPath;
+    private String screen="chat", draft="", cameraPath;
     private boolean openLogin, visible;
     private LinearLayout root, content, thread, intro, attachment;
     private ScrollView scroll;
@@ -48,7 +56,7 @@ public final class MainActivity extends Activity {
         }
         if (state!=null) {
             screen=state.getString("screen","chat"); draft=state.getString("draft","");
-            photo=state.getString("photo"); cameraPath=state.getString("camera"); photoChat=state.getLong("photoChat");
+            cameraPath=state.getString("camera"); photoChat=state.getLong("photoChat");
             openLogin=state.getBoolean("launch");
         }
         startRuntime(); draw();
@@ -74,10 +82,10 @@ public final class MainActivity extends Activity {
         super.onResume(); visible=true; app.listen(this::update); app.account.refresh(false); update();
     }
     @Override public void onPause() { visible=false; app.listen(null); super.onPause(); }
-    @Override public void onDestroy() { files.shutdown(); super.onDestroy(); }
+    @Override public void onDestroy() { files.shutdown(); thumbnails.shutdownNow(); super.onDestroy(); }
     @Override public void onSaveInstanceState(Bundle b) {
         super.onSaveInstanceState(b);
-        b.putString("screen",screen); b.putString("draft",draft); b.putString("photo",photo);
+        b.putString("screen",screen); b.putString("draft",draft);
         b.putString("camera",cameraPath); b.putLong("photoChat",photoChat); b.putBoolean("launch",openLogin);
     }
     @Override public void onBackPressed() {
@@ -85,7 +93,7 @@ public final class MainActivity extends Activity {
     }
     private void choose(long id) { chatId=id; preferences().edit().putLong("chat",id).apply(); }
     private void selectChat(long id) {
-        if (id!=chatId) { discardPhoto(); draft=""; choose(id); }
+        if (id!=chatId) { draft=""; choose(id); }
         go("chat");
     }
     private void go(String page) {
@@ -137,7 +145,7 @@ public final class MainActivity extends Activity {
                 Loopback api=app.api;
                 subtitle.setText(api!=null && app.account.stored ? app.account.modelStatus(api) : status());
                 subtitle.setVisibility(View.VISIBLE);
-                renderMessages(); updateSend();
+                renderMessages(); drawAttachment(); updateSend();
         }
     }
     private String status() {
@@ -156,7 +164,9 @@ public final class MainActivity extends Activity {
         thread=a.column(); canvas.addView(thread,a.size(-1,-2));
         LinearLayout composer=a.column(); a.pad(composer,8,6); composer.setBackground(a.shape(WHITE,22,LINE));
         LinearLayout.LayoutParams box=a.size(-1,-2); box.setMargins(a.dp(14),a.dp(4),a.dp(14),a.dp(12)); content.addView(composer,box);
-        attachment=a.row(); composer.addView(attachment); drawAttachment();
+        attachmentScroll=new HorizontalScrollView(this); attachmentScroll.setHorizontalScrollBarEnabled(false);
+        composer.addView(attachmentScroll,a.size(-1,-2));
+        attachment=a.row(); attachmentScroll.addView(attachment); shownDraft=null;
         input=new EditText(this); input.setTextSize(17); input.setTextColor(INK); input.setHintTextColor(DIM);
         input.setHint("输入消息"); input.setBackgroundColor(WHITE); a.pad(input,10,7);
         input.setInputType(android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE);
@@ -170,6 +180,8 @@ public final class MainActivity extends Activity {
         LinearLayout tools=a.row(); composer.addView(tools);
         ImageButton gallery=a.icon(R.drawable.ic_gallery,"相册",this::gallery), camera=a.icon(R.drawable.ic_camera,"拍照",this::camera);
         for (ImageButton b:new ImageButton[]{gallery,camera}) { a.buttonStyle(b,WHITE,12); tools.addView(b,a.size(48,48)); }
+        TextView file=a.button("文件",false,this::documents);
+        a.buttonStyle(file,WHITE,12); a.pad(file,6,0); tools.addView(file,a.size(48,48));
         tools.addView(new View(this),new LinearLayout.LayoutParams(0,1,1));
         send=a.icon(R.drawable.ic_send,"发送",this::send); a.buttonStyle(send,BLUE,15); send.setColorFilter(WHITE);
         tools.addView(send,a.size(48,46));
@@ -203,9 +215,7 @@ public final class MainActivity extends Activity {
                 LinearLayout.LayoutParams gp=a.size(-1,-2); gp.bottomMargin=a.dp(16);
                 if (user) gp.leftMargin=a.dp(34); else gp.rightMargin=a.dp(18); thread.addView(group,gp);
                 if (!user) { group.addView(a.text("DeepSeek",12,DIM,true)); a.gap(group,5); }
-                if (m.photo!=null) {
-                    ImageView img=preview(m.photo); group.addView(img,a.size(148,116)); a.gap(group,4);
-                }
+                if (!m.attachments.isEmpty()) messageFiles(group,m.attachments);
                 body=a.text("",16,INK,false); body.setTextIsSelectable(true);
                 if (user) { body.setBackground(a.shape(PALE,17,0)); a.pad(body,14,11); }
                 else a.pad(body,0,3);
@@ -224,7 +234,7 @@ public final class MainActivity extends Activity {
     }
     private void updateSend() {
         if (send==null) return;
-        boolean can=!app.chat.busy() && (!draft.trim().isEmpty() || photo!=null);
+        boolean can=!app.chat.busy() && !app.imports.busy(chatId) && (!draft.trim().isEmpty() || !draftFiles.isEmpty());
         send.setEnabled(can); send.setAlpha(can?1f:.44f);
     }
     private void send() {
@@ -234,7 +244,7 @@ public final class MainActivity extends Activity {
             toast(app.account.modelError.isEmpty() ? "正在获取可用模型" : app.account.modelError);
             app.account.refresh(true); return;
         }
-        if (app.chat.send(chatId,draft.trim(),photo)) { photo=null; input.setText(""); drawAttachment(); update(); }
+        if (app.chat.send(chatId,draft.trim(),app.history.draft(chatId))) { input.setText(""); update(); }
     }
     private boolean retryService() { return "failed".equals(app.serviceState)||"stopped".equals(app.serviceState); }
 
@@ -329,30 +339,123 @@ public final class MainActivity extends Activity {
     private void openExternal(Uri uri) {
         try { startActivity(new Intent(Intent.ACTION_VIEW,uri)); } catch (ActivityNotFoundException e) { toast("未找到浏览器"); }
     }
-    private ImageView preview(String path) {
-        Bitmap thumb=thumbs.get(path);
-        if (thumb==null) {
-            BitmapFactory.Options opt=new BitmapFactory.Options(); opt.inSampleSize=4;
-            thumb=BitmapFactory.decodeFile(new File(getFilesDir(),path).getPath(),opt);
-            if (thumb!=null) thumbs.put(path,thumb);
+    private ImageView preview(String path,String label) {
+        ImageView img=new ImageView(this) {
+            private final Paint paint=new Paint(Paint.FILTER_BITMAP_FLAG);
+            private final RectF bounds=new RectF();
+            private boolean loading,failed;
+            @Override protected void onDraw(Canvas canvas) {
+                // The history uses a ScrollView. Off-screen bubbles must not pin every decoded bitmap.
+                Bitmap bitmap=thumbs.get(path);
+                if (bitmap!=null) {
+                    float scale=Math.max((float)getWidth()/bitmap.getWidth(),(float)getHeight()/bitmap.getHeight());
+                    float w=bitmap.getWidth()*scale, h=bitmap.getHeight()*scale;
+                    bounds.set((getWidth()-w)/2,(getHeight()-h)/2,(getWidth()+w)/2,(getHeight()+h)/2);
+                    canvas.drawBitmap(bitmap,null,bounds,paint);
+                } else if (failed) super.onDraw(canvas);
+                else if (!loading && !thumbnails.isShutdown()) {
+                    loading=true;
+                    int edge=Math.min(440,a.dp(148));
+                    thumbnails.execute(()->{
+                        try {
+                            Bitmap decoded=Photos.load(MainActivity.this,path,edge);
+                            thumbs.put(path,decoded); post(()->{ loading=false; invalidate(); });
+                        } catch (IOException e) {
+                            post(()->{ loading=false; failed=true; setImageResource(R.drawable.ic_gallery); });
+                        }
+                    });
+                }
+            }
+        };
+        img.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        img.setBackground(a.shape(PALE,12,0)); img.setClipToOutline(true); img.setContentDescription(label);
+        return img;
+    }
+    private List<String> imagePaths(List<Attachment> items) {
+        List<String> paths=new ArrayList<>();
+        for (Attachment item:items) if (item.kind!=Attachment.Kind.TEXT) paths.addAll(item.paths);
+        return paths;
+    }
+    private void messageFiles(LinearLayout group,List<Attachment> items) {
+        List<String> paths=imagePaths(items);
+        int width=getResources().getDisplayMetrics().widthPixels;
+        int side=Math.min(96,Math.max(48,(int)((width-a.dp(88))/getResources().getDisplayMetrics().density/3)));
+        LinearLayout row=null;
+        for (int i=0;i<paths.size();i++) {
+            if (i%3==0) { row=a.row(); group.addView(row,a.size(-2,-2)); }
+            final int index=i;
+            ImageView image=preview(paths.get(i),"照片 "+(i+1));
+            image.setOnClickListener(v->PhotoViewer.open(this,paths,index));
+            LinearLayout.LayoutParams size=paths.size()==1 ? a.size(148,116) : a.size(side,side);
+            size.setMargins(a.dp(2),a.dp(2),a.dp(2),a.dp(2)); row.addView(image,size);
         }
-        ImageView img=new ImageView(this); img.setScaleType(ImageView.ScaleType.CENTER_CROP); img.setImageBitmap(thumb);
-        img.setBackground(a.shape(PALE,12,0)); img.setClipToOutline(true); img.setContentDescription("照片"); return img;
+        for (Attachment item:items) if (item.kind!=Attachment.Kind.PHOTO) group.addView(fileChip(item),a.size(-2,42));
+        a.gap(group,4);
+    }
+    private TextView fileChip(Attachment item) {
+        TextView chip=a.button(item.name,false,()->openDocument(item));
+        chip.setSingleLine(); chip.setMaxWidth(a.dp(245)); chip.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+        return chip;
+    }
+    private void openDocument(Attachment item) {
+        if (item.kind==Attachment.Kind.SCAN) { PhotoViewer.open(this,item.paths,0); return; }
+        files.execute(()->{
+            try {
+                String value=new String(Files.readAllBytes(Attachment.file(this,item.paths.get(0)).toPath()),StandardCharsets.UTF_8);
+                runOnUiThread(()->{
+                    if (isFinishing() || isDestroyed()) return;
+                    TextView text=a.text(value,15,INK,false); a.pad(text,20,12); text.setTextIsSelectable(true);
+                    ScrollView view=new ScrollView(this); view.addView(text);
+                    new AlertDialog.Builder(this).setTitle(item.name).setView(view).setPositiveButton("关闭",null).show();
+                });
+            } catch (IOException e) { app.notice("无法读取该文件"); }
+        });
     }
     private void drawAttachment() {
-        attachment.removeAllViews(); attachment.setVisibility(photo==null?View.GONE:View.VISIBLE);
-        if (photo!=null) {
-            attachment.addView(preview(photo),a.size(68,62));
-            attachment.addView(a.icon(R.drawable.ic_close,"移除照片",()->{discardPhoto(); drawAttachment(); updateSend();}),a.size(48,48));
+        draftFiles=app.history.draft(chatId);
+        List<Long> ids=new ArrayList<>();
+        for (Attachment item:draftFiles) ids.add(item.id);
+        if (ids.equals(shownDraft)) return;
+        shownDraft=ids;
+        attachment.removeAllViews(); attachmentScroll.setVisibility(ids.isEmpty()?View.GONE:View.VISIBLE);
+        List<String> paths=imagePaths(draftFiles);
+        for (Attachment item:draftFiles) {
+            if (item.kind==Attachment.Kind.PHOTO) {
+                String path=item.paths.get(0);
+                ImageView img=preview(path,"待发照片 "+(paths.indexOf(path)+1));
+                img.setOnClickListener(v->PhotoViewer.open(this,paths,paths.indexOf(path)));
+                attachment.addView(img,a.size(62,62));
+            } else attachment.addView(fileChip(item),a.size(-2,42));
+            attachment.addView(a.icon(R.drawable.ic_close,item.kind==Attachment.Kind.PHOTO ? "移除照片" : "移除文件",()->{
+                app.history.removeDraft(chatId,item.id,app.log); drawAttachment(); updateSend();
+            }),a.size(44,44));
         }
     }
-    private void discardPhoto() { if (photo!=null) { new File(getFilesDir(),photo).delete(); photo=null; } }
     private void gallery() {
+        if (app.imports.busy(chatId)) return;
+        int slots=Attachment.MAX_IMAGES-Attachment.images(draftFiles);
+        if (slots<=0) { toast("最多 9 张图片"); return; }
         photoChat=chatId;
-        try { startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("image/*"),PICK); }
+        if (Build.VERSION.SDK_INT>=33) {
+            Intent pick=new Intent(MediaStore.ACTION_PICK_IMAGES).setType("image/*");
+            if (slots>1) pick.putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX,Math.min(slots,MediaStore.getPickImagesMaxLimit()));
+            try { startActivityForResult(pick,PICK); return; } catch (ActivityNotFoundException ignored) {}
+        }
+        try { startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("image/*").putExtra(Intent.EXTRA_ALLOW_MULTIPLE,slots>1),PICK); }
         catch (ActivityNotFoundException e) { toast("相册不可用"); }
     }
+    private void documents() {
+        if (app.imports.busy(chatId)) return;
+        if (Attachment.documents(draftFiles)>=Attachment.MAX_DOCUMENTS) { toast("最多 4 个文件"); return; }
+        photoChat=chatId;
+        try { startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("*/*").putExtra(Intent.EXTRA_ALLOW_MULTIPLE,true),DOCUMENT); }
+        catch (ActivityNotFoundException e) { toast("无法选择文件"); }
+    }
     private void camera() {
+        if (app.imports.busy(chatId)) return;
+        if (Attachment.images(draftFiles)>=Attachment.MAX_IMAGES) { toast("最多 9 张图片"); return; }
         photoChat=chatId;
         try {
             File dir=new File(getCacheDir(),"camera"); dir.mkdirs(); File f=File.createTempFile("photo-",".jpg",dir); cameraPath=f.getPath();
@@ -378,21 +481,21 @@ public final class MainActivity extends Activity {
                     if (out==null) throw new IOException(); app.log.export(out); app.notice("日志已导出");
                 } catch (Exception e) { app.notice("导出失败，请重试"); } }); return;
         }
-        if (req!=PICK && req!=CAMERA) return;
-        final File camera=req==CAMERA && cameraPath!=null?new File(cameraPath):null;
-        final Uri src=camera!=null?Uri.fromFile(camera):uri;
-        final long owner=photoChat; cameraPath=null;
-        if (src==null) return;
-        files.execute(()->{
-            try {
-                String path=Photos.importPhoto(this,src);
-                runOnUiThread(()->{
-                    if (isDestroyed() || chatId!=owner || !"chat".equals(screen)) { new File(getFilesDir(),path).delete(); return; }
-                    discardPhoto(); photo=path; drawAttachment(); updateSend();
-                });
-            } catch (IOException|RuntimeException e) { app.notice("图片读取失败"); }
-            finally { if (camera!=null) camera.delete(); }
-        });
+        if (req!=PICK && req!=CAMERA && req!=DOCUMENT) return;
+        File camera=req==CAMERA && cameraPath!=null ? new File(cameraPath) : null;
+        cameraPath=null;
+        if (photoChat!=chatId) { if (camera!=null) camera.delete(); return; }
+        Set<Uri> sources=new LinkedHashSet<>();
+        if (camera!=null) sources.add(Uri.fromFile(camera));
+        else if (data!=null && data.getClipData()!=null) {
+            ClipData clip=data.getClipData();
+            int cap=req==DOCUMENT ? Attachment.MAX_DOCUMENTS : Attachment.MAX_IMAGES;
+            for (int i=0;i<Math.min(clip.getItemCount(),cap+1);i++) {
+                Uri picked=clip.getItemAt(i).getUri();
+                if (picked!=null) sources.add(picked);
+            }
+        } else if (uri!=null) sources.add(uri);
+        if (!sources.isEmpty()) app.imports.add(photoChat,new ArrayList<>(sources),req==DOCUMENT,camera);
     }
     private void toast(String message) { app.notice(message); }
 }

@@ -3,7 +3,6 @@ package com.sunwin.deepseekharness;
 import okhttp3.*;
 import org.json.*;
 import java.io.*;
-import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.*;
 import static com.sunwin.deepseekharness.Diagnostics.Event.*;
@@ -28,6 +27,7 @@ final class ChatEngine {
         History.Chat chat=app.history.chat(id);
         if (chat==null) return current;
         long next=app.history.delete(id,current,app.log);
+        app.imports.cancel(id);
         if (active!=null && active.chat.id==id) {
             if (active.socket!=null) active.socket.cancel();
             active=null;
@@ -64,12 +64,14 @@ final class ChatEngine {
         if (active==work) active=null;
         app.changed();
     }
-    synchronized boolean send(long chatId,String text,String photo) {
+    synchronized boolean send(long chatId,String text,List<Attachment> files) {
         Loopback api=app.api;
         String model=app.account.selected;
-        if (busy() || api==null || !app.account.stored || model.isEmpty() || (text.isEmpty() && photo==null)) return false;
+        if (busy() || app.imports.busy(chatId) || api==null || !app.account.stored || model.isEmpty() || (text.isEmpty() && files.isEmpty())
+                || Attachment.images(files)>Attachment.MAX_IMAGES || Attachment.documents(files)>Attachment.MAX_DOCUMENTS) return false;
+        List<Attachment> attachments=new ArrayList<>(files);
         long row;
-        try { row=app.history.begin(chatId,text,photo); }
+        try { row=app.history.begin(chatId,text,attachments); }
         catch (android.database.sqlite.SQLiteException e) {
             ChatFailure failure=ChatFailure.caught(e,SAVE_REPLY);
             app.log.interrupted(SAVE_REPLY,failure); app.notice(failure.getMessage()); return false;
@@ -77,7 +79,7 @@ final class ChatEngine {
         Work work=new Work(app.history.chat(chatId),model);
         active=work;
         app.changed();
-        io.execute(() -> run(api,work,row,text,photo));
+        io.execute(() -> run(api,work,row,text,attachments));
         return true;
     }
     private void select(Loopback api,String session,String model) throws Exception {
@@ -108,14 +110,14 @@ final class ChatEngine {
             } finally { finish(work); }
         });
     }
-    private void run(Loopback api,Work work,long row,String text,String photo) {
+    private void run(Loopback api,Work work,long row,String text,List<Attachment> files) {
         String requestId=UUID.randomUUID().toString();
         Reply reply=new Reply(requestId);
         WebSocket socket=null;
         String session=work.chat.remote;
         ChatFailure.Stage stage=CREATE_SESSION;
         ChatFailure failure=null;
-        long draft=ContextUsage.estimate(text,photo!=null);
+        long draft=ContextUsage.estimate(text,files);
         ContextUsage prepared=null;
         try {
             if (active!=work) return;
@@ -130,12 +132,12 @@ final class ChatEngine {
             select(api,session,work.model);
             stage=CONTEXT;
             if (active!=work) return;
-            prepared=ContextUsage.prepare(api,session,Long.toString(draft));
+            prepared=ContextUsage.prepare(api,session,ContextUsage.argument(draft,files));
+            draft+=prepared.fileBytes;
             meter(work,prepared);
             app.changed();
-            stage=READ_PHOTO;
-            String jpeg=photo==null ? null : Base64.getEncoder().encodeToString(Files.readAllBytes(new File(app.getFilesDir(),photo).toPath()));
-            JSONObject prompt=Wire.prompt(session,requestId,text,jpeg);
+            stage=READ_ATTACHMENT;
+            JSONObject prompt=Wire.prompt(app,session,requestId,text,files,prepared.fileBytes);
             Feed feed=new Feed(Wire.follow(session).toString());
             stage=FOLLOW;
             socket=follow(work,api,feed);
@@ -176,7 +178,7 @@ final class ChatEngine {
         } catch (Exception e) {
             failure=ChatFailure.caught(e,stage);
             ChatFailure stopped=api.stoppedBecause();
-            if (stopped!=null && stage!=READ_PHOTO && failure.code.isEmpty() && failure.access==null) {
+            if (stopped!=null && stage!=READ_ATTACHMENT && failure.code.isEmpty() && failure.access==null) {
                 failure=stopped;
             }
         } finally {
@@ -197,7 +199,7 @@ final class ChatEngine {
             if (failure==null && reply.completed) {
                 app.history.update(row,reply.body(),"done");
                 if (reply.contextTokens<0 && prepared!=null) meter(work,
-                        new ContextUsage(prepared.used+draft+ContextUsage.estimate(reply.body(),false),prepared.window,false));
+                        new ContextUsage(prepared.used+draft+ContextUsage.estimate(reply.body(),Collections.emptyList()),prepared.window,false));
                 app.log.add(CHAT_COMPLETE);
             } else {
                 if (failure==null) failure=new ChatFailure("DSH 回合未结束");

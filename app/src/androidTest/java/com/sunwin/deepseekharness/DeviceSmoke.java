@@ -30,6 +30,14 @@ public final class DeviceSmoke extends Instrumentation {
         try {
             if (!"ranchu".equals(Build.HARDWARE) && !Build.HARDWARE.contains("goldfish")) throw new AssertionError();
             String mode=options.getString("scenario","history");
+            if ("attachment-seed-v4".equals(mode)) {
+                stage="seed-v4"; seedOldPhoto();
+                result.putString("passed",mode); finish(Activity.RESULT_OK,result); return;
+            }
+            if ("attachment-pdf".equals(mode)) {
+                stage="native-pdf"; DeviceAttachments.pdfs(this);
+                result.putString("passed",mode); finish(Activity.RESULT_OK,result); return;
+            }
             if ("self-check".equals(mode)) {
                 checkBindings(result);
                 result.putString("passed",mode); finish(Activity.RESULT_OK,result); return;
@@ -54,10 +62,13 @@ public final class DeviceSmoke extends Instrumentation {
             }
             activity=(MainActivity)startActivitySync(new Intent(getTargetContext(),MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             app=(HarnessApp)activity.getApplication();
-            if ("context".equals(mode)) {
+            if ("context".equals(mode) || "attachments".equals(mode)) {
                 DeviceContext test=new DeviceContext(this,activity);
-                try { test.run(Integer.parseInt(options.getString("fixturePort"))); }
+                try { test.run(Integer.parseInt(options.getString("fixturePort")),mode); }
                 finally { stage=test.stage; }
+            } else if ("attachments-reopen".equals(mode) || "attachment-upgrade".equals(mode)) {
+                DeviceAttachments test=new DeviceAttachments(this,activity);
+                try { test.reopen("attachment-upgrade".equals(mode)); } finally { stage=test.stage; }
             } else if ("delete".equals(mode)) {
                 DeviceDeletion test=new DeviceDeletion(this,activity);
                 try { test.run(); } finally { stage=test.stage; }
@@ -72,6 +83,26 @@ public final class DeviceSmoke extends Instrumentation {
             if (e instanceof ChatFailure) result.putString("detail",((ChatFailure)e).diagnostic());
             finish(Activity.RESULT_CANCELED,result);
         }
+    }
+    // Run with the published 0.1.4 target installed. Use only old schema and Android APIs.
+    private void seedOldPhoto() throws IOException {
+        Context target=getTargetContext();
+        try (History history=new History(target)) {
+            android.database.sqlite.SQLiteDatabase db=history.getWritableDatabase();
+            if (db.getVersion()!=4) throw new AssertionError();
+            String path="photos/upgrade-"+UUID.randomUUID()+".jpg";
+            File photo=new File(target.getFilesDir(),path);
+            Files.createDirectories(photo.toPath().getParent());
+            try (InputStream in=getContext().getAssets().open("photo.jpg")) { Files.copy(in,photo.toPath()); }
+            db.beginTransaction();
+            try {
+                db.execSQL("INSERT INTO chat(title,updated) VALUES('升级前照片',0)");
+                db.execSQL("INSERT INTO message(chat,role,body,photo,state) VALUES(last_insert_rowid(),'user','升级前照片',?,'done')",new Object[]{path});
+                db.setTransactionSuccessful();
+            } finally { db.endTransaction(); }
+        }
+        // Keep system permission dialogs out of this empty emulator's interaction test.
+        target.getSharedPreferences("ui",0).edit().putBoolean("notificationAsked",true).putBoolean("batteryAsked",true).commit();
     }
     private void checkBindings(Bundle result) throws Exception {
         Context base=getTargetContext();
@@ -178,7 +209,7 @@ public final class DeviceSmoke extends Instrumentation {
             control("设置",true); control("导出诊断日志",false); control("充值",false);
             control("返回",true); control("历史对话",true); control("新建对话",true);
             long id=activity.getSharedPreferences("ui",0).getLong("chat",0);
-            long reply=app.history.begin(id,title,null); app.history.update(reply,answer,"done");
+            long reply=app.history.begin(id,title,Collections.emptyList()); app.history.update(reply,answer,"done");
             runOnMainSync(app::changed); waitForIdleSync();
         }
         control("历史对话",true); control(title,true); control(answer,false); control("相册",false); control("拍照",false);
@@ -214,7 +245,7 @@ public final class DeviceSmoke extends Instrumentation {
             Path session=app.getNoBackupFilesDir().toPath().resolve("linux/home/dsh/.dsh/sessions/--home-dsh-chat--").resolve(id);
             long baseline=journalBytes(session);
             stage="first-prompt";
-            api.rpc("session/prompt",Wire.prompt(id,request,"你好",null));
+            api.rpc("session/prompt",Wire.prompt(app,id,request,"你好",Collections.emptyList(),0));
             stage="session-journal";
             Reply reply=new Reply(request);
             long until=SystemClock.elapsedRealtime()+90000;

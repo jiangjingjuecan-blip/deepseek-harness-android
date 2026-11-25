@@ -2,6 +2,7 @@
 from email import policy
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -70,13 +71,18 @@ class Server(BaseHTTPRequestHandler):
         if self.path == '/v1/files':
             mime = BytesParser(policy=policy.default).parsebytes(
                 ('Content-Type: ' + self.headers['Content-Type'] + '\r\n\r\n').encode() + data)
-            ok = any(p.get_content_type() == 'image/jpeg' and p.get_payload(decode=True) == PHOTO
-                     for p in mime.iter_parts())
-            if not ok:
+            image = next((p.get_payload(decode=True) for p in mime.iter_parts() if p.get_content_type() == 'image/jpeg'), b'')
+            if image == PHOTO:
+                file_id = 'file-pixel'
+            elif len(image) == len(PHOTO)+5 and image[:6] == bytes.fromhex('ffd8fffe0003') and image[7:] == PHOTO[2:]:
+                file_id = 'file-pixel-'+str(image[6])
+            elif self.server.device_attachments and image.startswith(bytes.fromhex('ffd8')) and 0 < len(image) < 65536:
+                file_id = 'file-'+hashlib.sha256(image).hexdigest()[:16]
+            else:
                 self.send_error(400)
                 return
             self.server.seen.add('photo')
-            self.json({'id':'file-pixel','type':'file','mime_type':'image/jpeg','size_bytes':len(PHOTO),
+            self.json({'id':file_id,'type':'file','mime_type':'image/jpeg','size_bytes':len(image),
                        'created_at':'2026-11-23T00:00:00Z','filename':'test.jpg'})
             return
         if self.path != '/v1/messages':
@@ -86,6 +92,17 @@ class Server(BaseHTTPRequestHandler):
         msgs = obj['messages']
         contents = json.dumps(msgs, ensure_ascii=False)
         last = json.dumps(msgs[-1], ensure_ascii=False)
+        if self.server.device_attachments and '附件回放' in last:
+            blocks=msgs[-1]['content']
+            images=[b.get('source',{}).get('file_id') for b in blocks if b.get('type')=='image']
+            if (len(images)!=3 or len(set(images))!=3 or not all(images) or
+                    '[文件：便签.txt]' not in last or '设备文件正文' not in last or
+                    '[文件：报告.docx]' not in last or '设备段落' not in last):
+                self.send_error(400)
+                return
+            self.server.seen.add('device-attachments')
+            self.stream('附件已收到')
+            return
         if self.is_title(obj):
             self.stream('回放')
             return
@@ -100,6 +117,9 @@ class Server(BaseHTTPRequestHandler):
         if 'Condense the conversation ABOVE' in last:
             old_a, old_b = '甲' * 300 in contents, '乙' * 300 in contents
             if obj.get('max_tokens') != 2048 or old_a == old_b or '近三' in contents:
+                self.send_error(400)
+                return
+            if old_a and 'file-turn' in self.server.seen and '旧文件正文' not in contents:
                 self.send_error(400)
                 return
             if old_b and '摘要甲' not in contents:
@@ -125,6 +145,8 @@ class Server(BaseHTTPRequestHandler):
                     return
             answers={'固定首问':'首答', '旧甲':'旧图是紫色', '旧乙':'乙答', '近三':'三答',
                      '近四':'四答', '近五':'五答', '抬高用量':'六答', '核对自动':'七答'}
+            if '旧甲' in last and '[文件：归档.md]' in last and '旧文件正文' in last:
+                self.server.seen.add('file-turn')
             if '抬高用量' in last or '核对自动' in last:
                 auto = '核对自动' in last
                 recent = ['近三','近四','近五','抬高用量'] if auto else ['旧乙'+'乙'*600,'近三','近四','近五']
@@ -134,7 +156,7 @@ class Server(BaseHTTPRequestHandler):
                 tail=[]
                 for question in recent:
                     tail.extend([('user',question),('assistant',answers['旧乙' if question.startswith('旧乙') else question])])
-                if (summary not in contents or '甲' * 300 in contents or (auto and '乙' * 300 in contents)
+                if (summary not in contents or '旧文件正文' in contents or '甲' * 300 in contents or (auto and '乙' * 300 in contents)
                         or texts[-9:-1]!=tail or '首答' not in contents):
                     self.send_error(400)
                     return
@@ -158,12 +180,17 @@ class Server(BaseHTTPRequestHandler):
             self.send_error(400)
             return
         if second:
-            if (first or 'image omitted' not in contents or '"type": "image"' in contents or
+            if (first or contents.count('image omitted')!=9 or '"type": "image"' in contents or
                     not any(m['role']=='assistant' and '紫色' in json.dumps(m,ensure_ascii=False) for m in msgs)):
                 self.send_error(400)
                 return
             self.server.seen.add('multi')
         else:
+            images=[b.get('source',{}).get('file_id') for b in msgs[-1]['content'] if b.get('type')=='image']
+            if images!=['file-pixel']+['file-pixel-'+str(i) for i in range(1,9)]:
+                self.send_error(400)
+                return
+            self.server.seen.add('nine-images')
             self.server.seen.add('image-turn')
         self.stream('第二轮' if second else '紫', split=not second)
 
@@ -193,7 +220,7 @@ class Server(BaseHTTPRequestHandler):
         event('message_stop')
 
 
-def run(abi, root, serial=None):
+def run(abi, root, serial=None, scenario='context'):
     layout = ROOT / 'runtime-cache' / abi
     sysroot = root / 'sys'
     for line in (layout/'assets/bindings.tsv').read_text().splitlines():
@@ -210,6 +237,7 @@ def run(abi, root, serial=None):
     home = root/'dsh'
     home.mkdir(exist_ok=True)
     with ThreadingHTTPServer(('127.0.0.1',0),Server) as server:
+        server.device_attachments=scenario=='attachments'
         server.advance=threading.Event()
         server.grant=secrets.token_urlsafe(24)
         server.seen=set()
@@ -241,7 +269,7 @@ def run(abi, root, serial=None):
                     for line in proc.stdout:
                         launch=re.fullmatch(rb'dsh web: http://127\.0\.0\.1:(\d+)(/\?token=\S+)\s*', line)
                         if launch:
-                            return device(serial, server, root, int(launch[1]), launch[2].decode())
+                            return device(serial, server, root, int(launch[1]), launch[2].decode(), scenario)
                     return False
 
                 def pipe_launch():
@@ -258,7 +286,7 @@ def run(abi, root, serial=None):
                     if line.strip()=='done':
                         return (server.summaries == ['a','b'] and
                                 server.seen=={'early','multi','image-turn','photo','quota','future-cap','restored-cap',
-                                              'summary-a','summary-b','manual-tail','auto-tail'})
+                                              'summary-a','summary-b','manual-tail','auto-tail','nine-images','file-turn'})
             finally:
                 if proc.poll() is None:
                     os.killpg(proc.pid,signal.SIGTERM)
@@ -266,7 +294,7 @@ def run(abi, root, serial=None):
                     except subprocess.TimeoutExpired: os.killpg(proc.pid,signal.SIGKILL)
 
 
-def device(serial, server, root, runtime_port, bootstrap):
+def device(serial, server, root, runtime_port, bootstrap, scenario):
     adb = [str(Path(os.environ['ANDROID_HOME'])/'platform-tools/adb'),'-s',serial]
     ports = []
     try:
@@ -276,12 +304,14 @@ def device(serial, server, root, runtime_port, bootstrap):
             ports.append(port_arg)
         # Single-use handoff over adb loopback. No credential goes in argv or instrumentation output.
         server.handoff={'port':runtime_port,'path':bootstrap,'cwd':str(root)}
-        result=subprocess.run([*adb,'shell','am','instrument','-w','-e','scenario','context',
+        result=subprocess.run([*adb,'shell','am','instrument','-w','-e','scenario',scenario,
                                '-e','fixturePort',str(server.server_port),
                                'com.sunwin.deepseekharness.test/com.sunwin.deepseekharness.DeviceSmoke'],
                               stdout=subprocess.PIPE,text=True,check=True)
         print(result.stdout, end='')
         print('Provider observations:',', '.join(sorted(server.seen)))
+        if scenario=='attachments':
+            return 'passed=attachments' in result.stdout and 'device-attachments' in server.seen
         return ('passed=context' in result.stdout and server.summaries == ['a','b'] and
                 {'summary-a','summary-b','manual-tail','auto-tail'} <= server.seen)
     finally:
@@ -291,9 +321,9 @@ def device(serial, server, root, runtime_port, bootstrap):
 
 if __name__=='__main__':
     os.umask(0o077)
-    if len(sys.argv)==3 and sys.argv[1]=='--device':
+    if len(sys.argv)==3 and sys.argv[1] in ('--device','--device-attachments'):
         with tempfile.TemporaryDirectory(prefix='phone-context-') as root:
-            raise SystemExit(0 if run('arm64-v8a',Path(root),sys.argv[2]) else 1)
+            raise SystemExit(0 if run('arm64-v8a',Path(root),sys.argv[2], 'attachments' if sys.argv[1]=='--device-attachments' else 'context') else 1)
     if not all(stat.S_ISFIFO(os.fstat(fd).st_mode) for fd in (0,1)) or len(sys.argv)!=3:
         raise SystemExit('Run the Gradle replay test.')
     raise SystemExit(0 if run(sys.argv[1],Path(sys.argv[2])) else 1)

@@ -2,20 +2,37 @@ package com.sunwin.deepseekharness;
 
 import org.json.*;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 /** Occupancy for a single model request, never cumulative session billing. */
 final class ContextUsage {
     final long used, window;
     final boolean compacted;
+    final int fileBytes;
+    static final int MAX_FILE_BYTES=64*1024;
 
     ContextUsage(long used,long window,boolean compacted) {
-        this.used=used; this.window=window; this.compacted=compacted;
+        this(used,window,compacted,0);
+    }
+    private ContextUsage(long used,long window,boolean compacted,int fileBytes) {
+        this.used=used; this.window=window; this.compacted=compacted; this.fileBytes=fileBytes;
     }
     static long defaultWindow(String model) {
         return "deepseek-flash".equals(model) || "deepseek-v4-pro".equals(model) ? 1048576 : 65536;
     }
-    static long estimate(String text,boolean photo) {
-        return 16L+text.getBytes(StandardCharsets.UTF_8).length+(photo ? 1032 : 0);
+    static String fileLabel(String name) { return "[文件："+name+"]\n"; }
+    static long estimate(String text,List<Attachment> items) {
+        long cost=16L+text.getBytes(StandardCharsets.UTF_8).length+1032L*Attachment.images(items);
+        for (Attachment item:items) {
+            if (item.kind!=Attachment.Kind.PHOTO) cost+=8+fileLabel(item.name).getBytes(StandardCharsets.UTF_8).length;
+            if (item.kind==Attachment.Kind.TEXT) cost+=4; // Room for a UTF-8 newline and ellipsis.
+        }
+        return cost;
+    }
+    static String argument(long base,List<Attachment> items) {
+        int bytes=0, count=0;
+        for (Attachment item:items) if (item.kind==Attachment.Kind.TEXT) { bytes+=item.textBytes; count++; }
+        return count==0 ? Long.toString(base) : "files "+base+" "+Math.min(bytes,MAX_FILE_BYTES)+" "+count;
     }
     String percent() {
         if (used>0 && used*100.0/window<1) return "<1%";
@@ -51,8 +68,11 @@ final class ContextUsage {
             if ("消息过长".equals(text) || "上下文过长".equals(text) || "正在压缩".equals(text)) throw new ChatFailure(text);
             throw new ChatFailure("压缩失败");
         }
-        if (!text.matches("[0-9]{1,15} [1-9][0-9]{0,14} [01]")) throw new ChatFailure("上下文响应无效");
+        boolean files=argument.startsWith("files ");
+        if (!text.matches("[0-9]{1,15} [1-9][0-9]{0,14} [01]"+(files ? " [0-9]{1,5}" : ""))) throw new ChatFailure("上下文响应无效");
         String[] fields=text.split(" ");
-        return new ContextUsage(Long.parseLong(fields[0]),Long.parseLong(fields[1]),"1".equals(fields[2]));
+        int allowance=files ? Integer.parseInt(fields[3]) : 0;
+        if (allowance>MAX_FILE_BYTES) throw new ChatFailure("上下文响应无效");
+        return new ContextUsage(Long.parseLong(fields[0]),Long.parseLong(fields[1]),"1".equals(fields[2]),allowance);
     }
 }

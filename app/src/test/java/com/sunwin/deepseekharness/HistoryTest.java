@@ -1,5 +1,7 @@
 package com.sunwin.deepseekharness;
 
+import java.util.*;
+
 import android.app.Application;
 import android.database.sqlite.SQLiteDatabase;
 import org.junit.*;
@@ -16,15 +18,15 @@ public class HistoryTest {
     @Test public void restartRetainsSessionImageAndPartialReply() {
         Application ctx=RuntimeEnvironment.getApplication();
         History first=new History(ctx); long id=first.create();
-        first.link(id,"dsh-session"); long answer=first.begin(id,"看图","photos/example.jpg");
+        first.link(id,"dsh-session"); long answer=first.begin(id,"看图",Collections.singletonList(Attachment.photo("photos/example.jpg")));
         first.update(answer,"第一段","pending"); first.close();
         History second=new History(ctx); second.recover();
         List<History.Message> messages=second.messages(id);
         assertEquals("dsh-session",second.chat(id).remote); assertEquals("看图",second.list().get(0).title);
-        assertEquals("photos/example.jpg",messages.get(0).photo);
+        assertEquals("photos/example.jpg",messages.get(0).attachments.get(0).paths.get(0));
         assertEquals("interrupted",messages.get(1).state); assertEquals("第一段",messages.get(1).text);
         assertEquals("应用进程已重启",messages.get(1).error);
-        long follow=second.begin(id,"继续",null); second.update(follow,"尾声","done"); second.recover();
+        long follow=second.begin(id,"继续",Collections.emptyList()); second.update(follow,"尾声","done"); second.recover();
         assertEquals(4,second.messages(id).size()); assertEquals("done",second.messages(id).get(3).state);
         long blank=second.create(); assertTrue(second.messages(blank).isEmpty()); second.close();
     }
@@ -40,7 +42,7 @@ public class HistoryTest {
         try (History db=new History(ctx)) {
             assertNull(db.messages(1).get(0).error);
             assertEquals("旧正文",db.messages(1).get(0).text);
-            long row=db.begin(1,"继续",null);
+            long row=db.begin(1,"继续",Collections.emptyList());
             db.update(row,"第一段","interrupted","连接已断开");
             assertEquals(0,db.recover());
             History.Message reply=db.messages(1).get(2);
@@ -54,7 +56,7 @@ public class HistoryTest {
         app.api=new Loopback(1,app.log);
         app.account.stored=true; app.account.selected="deepseek-flash";
         app.api.close();
-        assertTrue(app.chat.send(chat,"你好",null));
+        assertTrue(app.chat.send(chat,"你好",Collections.emptyList()));
         long deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
         while (app.chat.busy() && System.nanoTime()<deadline) Thread.sleep(10);
         assertFalse(app.chat.busy());
@@ -72,14 +74,14 @@ public class HistoryTest {
             db.setVersion(2);
         }
         try (History db=new History(ctx)) {
-            assertTrue(db.meter(1,"deepseek-flash").used>=ContextUsage.estimate("原始照片",true));
+            assertTrue(db.meter(1,"deepseek-flash").used>=ContextUsage.estimate("原始照片",Collections.singletonList(Attachment.photo("photos/test.jpg"))));
             db.meter(1,"deepseek-flash",new ContextUsage(77,1048576,true));
         }
         try (History db=new History(ctx)) {
             assertEquals(77,db.meter(1,"deepseek-flash").used);
             assertEquals("remote",db.chat(1).remote);
             assertEquals("原始照片",db.messages(1).get(0).text);
-            assertEquals("photos/old.jpg",db.messages(1).get(0).photo);
+            assertEquals("photos/old.jpg",db.messages(1).get(0).attachments.get(0).paths.get(0));
         }
     }
 }

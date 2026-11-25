@@ -24,8 +24,8 @@ final class DeviceDeletion {
         touch("新建对话",false);
         long first=current(), second=app.history.create();
         String firstTitle="当前样例"+first, secondTitle="删除样例"+second;
-        app.history.update(app.history.begin(first,firstTitle,null),"保留的正文","done");
-        app.history.update(app.history.begin(second,secondTitle,null),"待删除的正文","done");
+        app.history.update(app.history.begin(first,firstTitle,Collections.emptyList()),"保留的正文","done");
+        app.history.update(app.history.begin(second,secondTitle,Collections.emptyList()),"待删除的正文","done");
         app.history.meter(first,"",new ContextUsage(30,100,true));
         app.changed();
         touch("历史对话",false);

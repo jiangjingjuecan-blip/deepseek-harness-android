@@ -13,11 +13,15 @@ final class History extends SQLiteOpenHelper {
         Chat(Cursor c) { id=c.getLong(0); title=c.getString(1); remote=c.getString(2); }
     }
     static final class Message {
-        final long id; final String role, text, photo, state, error;
-        Message(Cursor c) { id=c.getLong(0); role=c.getString(1); text=c.getString(2); photo=c.getString(3); state=c.getString(4); error=c.getString(5); }
+        final long id; final String role, text, state, error;
+        final List<Attachment> attachments;
+        Message(Cursor c,List<Attachment> attachments) {
+            id=c.getLong(0); role=c.getString(1); text=c.getString(2); state=c.getString(3); error=c.getString(4);
+            this.attachments=attachments;
+        }
     }
     private final File filesDir;
-    History(Context context) { super(context, "chats.db", null, 4); filesDir=context.getFilesDir(); }
+    History(Context context) { super(context, "chats.db", null, 5); filesDir=context.getFilesDir(); }
     @Override public void onConfigure(SQLiteDatabase db) { db.setForeignKeyConstraintsEnabled(true); }
     @Override public void onCreate(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE chat(id INTEGER PRIMARY KEY, title TEXT NOT NULL, remote TEXT UNIQUE, updated INTEGER NOT NULL)");
@@ -25,6 +29,7 @@ final class History extends SQLiteOpenHelper {
         db.execSQL("CREATE INDEX chat_messages ON message(chat,id)");
         createMeter(db);
         createPhotoCleanup(db);
+        createAttachments(db);
     }
     private static void createMeter(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE context_meter(chat INTEGER PRIMARY KEY REFERENCES chat(id) ON DELETE CASCADE, model TEXT NOT NULL, used INTEGER NOT NULL, capacity INTEGER NOT NULL)");
@@ -32,10 +37,24 @@ final class History extends SQLiteOpenHelper {
     private static void createPhotoCleanup(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE photo_cleanup(photo TEXT PRIMARY KEY NOT NULL)");
     }
+    private static void createAttachments(SQLiteDatabase db) {
+        // A NULL message owns a compose draft. One scan can own several ordered JPEGs.
+        db.execSQL("CREATE TABLE attachment(id INTEGER PRIMARY KEY, chat INTEGER NOT NULL REFERENCES chat(id) ON DELETE CASCADE, "+
+                "message INTEGER REFERENCES message(id) ON DELETE CASCADE, kind TEXT NOT NULL, name TEXT NOT NULL, bytes INTEGER NOT NULL)");
+        db.execSQL("CREATE INDEX chat_attachments ON attachment(chat,message,id)");
+        db.execSQL("CREATE TABLE attachment_file(attachment INTEGER NOT NULL REFERENCES attachment(id) ON DELETE CASCADE, "+
+                "position INTEGER NOT NULL, path TEXT NOT NULL, PRIMARY KEY(attachment,position))");
+    }
     @Override public void onUpgrade(SQLiteDatabase db,int oldVersion,int newVersion) {
         if (oldVersion < 2) db.execSQL("ALTER TABLE message ADD COLUMN error TEXT");
         if (oldVersion < 3) createMeter(db);
         if (oldVersion < 4) createPhotoCleanup(db);
+        if (oldVersion < 5) {
+            createAttachments(db);
+            db.execSQL("INSERT INTO attachment(id,chat,message,kind,name,bytes) SELECT id,chat,id,'PHOTO','照片.jpg',0 FROM message WHERE photo IS NOT NULL");
+            db.execSQL("INSERT INTO attachment_file SELECT id,0,photo FROM message WHERE photo IS NOT NULL");
+            db.execSQL("UPDATE message SET photo=NULL WHERE photo IS NOT NULL");
+        }
     }
     void meter(long id,String model,ContextUsage usage) {
         getWritableDatabase().execSQL("INSERT OR REPLACE INTO context_meter(chat,model,used,capacity) VALUES(?,?,?,?)",
@@ -48,7 +67,11 @@ final class History extends SQLiteOpenHelper {
                 return new ContextUsage(c.getLong(1),capacity,false);
             }
         }
-        try (Cursor c=getReadableDatabase().rawQuery("SELECT SUM(length(CAST(body AS BLOB))+16+CASE WHEN photo IS NULL THEN 0 ELSE 1032 END) FROM message WHERE chat=?",args(id))) {
+        try (Cursor c=getReadableDatabase().rawQuery(
+                "SELECT SUM(length(CAST(body AS BLOB))+16) + (SELECT COALESCE(SUM(CASE WHEN a.kind='TEXT' THEN a.bytes+8 "+
+                "ELSE 1032 END + CASE WHEN a.kind!='PHOTO' AND f.position=0 THEN length(CAST(a.name AS BLOB))+20 ELSE 0 END),0) "+
+                "FROM attachment a JOIN attachment_file f ON f.attachment=a.id WHERE a.message IS NOT NULL AND a.chat=?) "+
+                "FROM message WHERE chat=?",new String[]{Long.toString(id),Long.toString(id)})) {
             c.moveToFirst();
             return new ContextUsage(c.isNull(0) ? 0 : c.getLong(0)+1024,ContextUsage.defaultWindow(model),false);
         }
@@ -81,7 +104,7 @@ final class History extends SQLiteOpenHelper {
         try {
             // Allocate the replacement while the old row still exists. SQLite can reuse row IDs.
             if (current==id) current=create();
-            db.execSQL("INSERT OR IGNORE INTO photo_cleanup(photo) SELECT photo FROM message WHERE chat=? AND photo IS NOT NULL",
+            db.execSQL("INSERT OR IGNORE INTO photo_cleanup(photo) SELECT f.path FROM attachment_file f JOIN attachment a ON a.id=f.attachment WHERE a.chat=?",
                     new Object[]{id});
             db.delete("message","chat=?",args(id));
             db.delete("chat","id=?",args(id)); // context_meter cascades with its chat.
@@ -89,6 +112,27 @@ final class History extends SQLiteOpenHelper {
         } finally { db.endTransaction(); }
         cleanDeletedPhotos(log);
         return current;
+    }
+    void recoverAttachmentFiles(Diagnostics log) {
+        // Importers start after Application.onCreate. A killed import may have finished
+        // writing a JPEG or text file just before recording the draft in SQLite.
+        Set<String> candidates=new HashSet<>();
+        for (String folder:new String[]{"photos","documents"}) {
+            String[] names=new File(filesDir,folder).list((dir,name)->name.startsWith("attachment-"));
+            if (names!=null) for (String name:names) candidates.add(folder+"/"+name);
+        }
+        SQLiteDatabase db=getWritableDatabase();
+        db.beginTransaction();
+        try {
+            if (!candidates.isEmpty()) {
+                try (Cursor c=db.rawQuery("SELECT DISTINCT path FROM attachment_file",null)) {
+                    while (c.moveToNext()) candidates.remove(c.getString(0));
+                }
+                for (String path:candidates) db.execSQL("INSERT OR IGNORE INTO photo_cleanup VALUES(?)",new Object[]{path});
+            }
+            db.setTransactionSuccessful();
+        } finally { db.endTransaction(); }
+        cleanDeletedPhotos(log);
     }
     void cleanDeletedPhotos(Diagnostics log) {
         // A crash after the chat commit leaves the candidates here. Check surviving references
@@ -107,15 +151,16 @@ final class History extends SQLiteOpenHelper {
         } catch (SQLiteException | IOException | InvalidPathException e) { log.add(Diagnostics.Event.PHOTO_DELETE_FAILED); }
     }
     private void unlinkOrphans(SQLiteDatabase db,List<String> pending,Diagnostics log) throws IOException {
-        Path base=filesDir.getCanonicalFile().toPath(), dir=base.resolve("photos");
+        Path base=filesDir.getCanonicalFile().toPath();
         Set<Path> kept=new HashSet<>();
-        try (Cursor c=db.rawQuery("SELECT DISTINCT photo FROM message WHERE photo IS NOT NULL",null)) {
+        try (Cursor c=db.rawQuery("SELECT DISTINCT path FROM attachment_file",null)) {
             while (c.moveToNext()) kept.add(base.resolve(c.getString(0)).toFile().getCanonicalFile().toPath());
         }
         for (String reference:pending) {
             try {
                 Path path=base.resolve(reference).toFile().getCanonicalFile().toPath();
-                if (path.startsWith(dir) && !path.equals(dir) && !kept.contains(path) && Files.isRegularFile(path))
+                if ((path.startsWith(base.resolve("photos")) || path.startsWith(base.resolve("documents")))
+                        && !kept.contains(path) && Files.isRegularFile(path))
                     Files.deleteIfExists(path);
                 db.delete("photo_cleanup","photo=?",new String[]{reference});
             } catch (IOException | InvalidPathException e) { log.add(Diagnostics.Event.PHOTO_DELETE_FAILED); }
@@ -124,26 +169,90 @@ final class History extends SQLiteOpenHelper {
     void link(long id,String remote) {
         getWritableDatabase().execSQL("UPDATE chat SET remote=? WHERE id=?", new Object[]{remote,id});
     }
+    // Consumes one logical attachment, leaving the cursor at the next item or message.
+    private Attachment readAttachment(Cursor c,int column) {
+        long id=c.getLong(column);
+        Attachment.Kind kind=Attachment.Kind.valueOf(c.getString(column+1));
+        String name=c.getString(column+2); int bytes=c.getInt(column+3);
+        List<String> paths=new ArrayList<>();
+        do { paths.add(c.getString(column+4)); } while (c.moveToNext() && !c.isNull(column) && c.getLong(column)==id);
+        Attachment item=new Attachment(kind,name,bytes,paths); item.id=id;
+        return item;
+    }
+    List<Attachment> draft(long chat) {
+        List<Attachment> items=new ArrayList<>();
+        try (Cursor c=getReadableDatabase().rawQuery("SELECT a.id,a.kind,a.name,a.bytes,f.path FROM attachment a "+
+                "JOIN attachment_file f ON f.attachment=a.id WHERE a.chat=? AND a.message IS NULL ORDER BY a.id,f.position",args(chat))) {
+            if (c.moveToFirst()) while (!c.isAfterLast()) items.add(readAttachment(c,0));
+        }
+        return items;
+    }
     List<Message> messages(long id) {
-        List<Message> items = new ArrayList<>();
-        try (Cursor c = getReadableDatabase().rawQuery("SELECT id,role,body,photo,state,error FROM message WHERE chat=? ORDER BY id",args(id))) {
-            while (c.moveToNext()) items.add(new Message(c));
+        List<Message> items=new ArrayList<>();
+        // One snapshot: a newly committed bubble and its thumbnails must appear together.
+        try (Cursor c=getReadableDatabase().rawQuery("SELECT m.id,m.role,m.body,m.state,m.error,a.id,a.kind,a.name,a.bytes,f.path "+
+                "FROM message m LEFT JOIN attachment a ON a.chat=m.chat AND a.message=m.id "+
+                "LEFT JOIN attachment_file f ON f.attachment=a.id WHERE m.chat=? ORDER BY m.id,a.id,f.position",args(id))) {
+            if (c.moveToFirst()) while (!c.isAfterLast()) {
+                List<Attachment> files=new ArrayList<>();
+                Message message=new Message(c,files); items.add(message);
+                if (c.isNull(5)) c.moveToNext();
+                else do { files.add(readAttachment(c,5)); } while (!c.isAfterLast() && c.getLong(0)==message.id);
+            }
         }
         return items;
     }
     private static String[] args(long id) { return new String[]{Long.toString(id)}; }
-    long begin(long chat,String text,String photo) {
+    private void insertAttachment(SQLiteDatabase db,long chat,Long message,Attachment item) {
+        ContentValues v=new ContentValues();
+        v.put("chat",chat); v.put("message",message); v.put("kind",item.kind.name());
+        v.put("name",item.name); v.put("bytes",item.textBytes);
+        long id=db.insertOrThrow("attachment",null,v);
+        for (int i=0;i<item.paths.size();i++)
+            db.execSQL("INSERT INTO attachment_file VALUES(?,?,?)",new Object[]{id,i,item.paths.get(i)});
+    }
+    boolean addDraft(long chat,Attachment item) {
+        SQLiteDatabase db=getWritableDatabase(); db.beginTransaction();
+        try {
+            if (chat(chat)==null) return false;
+            List<Attachment> existing=draft(chat);
+            if (Attachment.images(existing)+item.imageCount()>Attachment.MAX_IMAGES ||
+                    (item.kind!=Attachment.Kind.PHOTO && Attachment.documents(existing)>=Attachment.MAX_DOCUMENTS)) return false;
+            insertAttachment(db,chat,null,item);
+            db.setTransactionSuccessful(); return true;
+        } finally { db.endTransaction(); }
+    }
+    void removeDraft(long chat,long id,Diagnostics log) {
+        SQLiteDatabase db=getWritableDatabase(); db.beginTransaction();
+        try {
+            db.execSQL("INSERT OR IGNORE INTO photo_cleanup SELECT path FROM attachment_file WHERE attachment IN "+
+                    "(SELECT id FROM attachment WHERE id=? AND chat=? AND message IS NULL)",new Object[]{id,chat});
+            db.delete("attachment","id=? AND chat=? AND message IS NULL",new String[]{Long.toString(id),Long.toString(chat)});
+            db.setTransactionSuccessful();
+        } finally { db.endTransaction(); }
+        cleanDeletedPhotos(log);
+    }
+    long begin(long chat,String text,List<Attachment> files) {
         SQLiteDatabase db = getWritableDatabase(); db.beginTransaction();
         try {
-            String title = text.isEmpty() ? "图片对话" : text.replace('\n',' ').trim();
-            int end = title.offsetByCodePoints(0,Math.min(22,title.codePointCount(0,title.length())));
+            String title=text.replace('\n',' ').trim();
+            if (title.isEmpty() && !files.isEmpty()) title=files.get(0).kind==Attachment.Kind.PHOTO ? "图片对话" : files.get(0).name;
+            int end=title.offsetByCodePoints(0,Math.min(22,title.codePointCount(0,title.length())));
             db.execSQL("UPDATE chat SET updated=?, title=CASE WHEN EXISTS(SELECT 1 FROM message WHERE chat=?) THEN title ELSE ? END WHERE id=?",
                     new Object[]{System.currentTimeMillis(),chat,title.substring(0,end),chat});
-            ContentValues v = new ContentValues();
-            v.put("chat",chat); v.put("role","user"); v.put("body",text); v.put("photo",photo); v.put("state","done");
-            db.insertOrThrow("message",null,v);
-            v.put("role","assistant"); v.put("body",""); v.putNull("photo"); v.put("state","pending");
-            long id = db.insertOrThrow("message",null,v);
+            ContentValues v=new ContentValues();
+            v.put("chat",chat); v.put("role","user"); v.put("body",text); v.put("state","done");
+            long user=db.insertOrThrow("message",null,v);
+            for (Attachment item:files) {
+                if (item.id==0) insertAttachment(db,chat,user,item);
+                else {
+                    ContentValues moved=new ContentValues(); moved.put("message",user);
+                    if (db.update("attachment",moved,"id=? AND chat=? AND message IS NULL",
+                            new String[]{Long.toString(item.id),Long.toString(chat)})!=1) throw new SQLiteException("stale-draft");
+                }
+            }
+            v.put("role","assistant"); v.put("body",""); v.put("state","pending");
+            long id=db.insertOrThrow("message",null,v);
             db.setTransactionSuccessful(); return id;
         } finally { db.endTransaction(); }
     }
